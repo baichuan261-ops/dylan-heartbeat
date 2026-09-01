@@ -43,7 +43,12 @@ const IS_RAILWAY_RUNTIME = Boolean(
 );
 // 批注 2026-08-10：默认路径仍是项目目录，保护本机/VPS 旧部署；Railway 挂载 Volume 后
 // DATA_DIR（或平台提供的 RAILWAY_VOLUME_MOUNT_PATH）统一承载时间线、时间戳、预设和日记。
-const DATA_DIR = ensureDataDir();
+// 强制使用 /tmp/dylan（Render 免费环境有权限）
+const DATA_DIR = "/tmp/dylan";
+// 确保目录存在
+if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+}
 const TIMELINE_FILE = runtimeFile("enhanced_messages.json");
 const TIMESTAMP_DB_FILE = runtimeFile("message_timestamps.json");
 // 批注 2026-07-17：管理页保存 .env 后要让 PM2 刷新进程环境；保留原进程名，
