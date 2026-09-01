@@ -33,7 +33,7 @@ const HEARTBEAT_URL = `${GATEWAY_BASE_URL}/internal/heartbeat`;
 const TIME_ZONE = resolveTimeZone();
 const WEATHER_TIMEOUT_MS = 5000;
 const DIARY_DIR_NAME = process.env.DIARY_DIR || "diary";
-const DIARY_DIR_PATH = runtimeDirectory(DIARY_DIR_NAME, "diary");
+const DIARY_DIR_PATH = path.join(DATA_DIR, DIARY_DIR_NAME);
 const PUSH_TIMEOUT_MS = readPositiveTimeout("PUSH_TIMEOUT_MS", 15_000);
 const WAKE_UPSTREAM_TIMEOUT_MS = readPositiveTimeout("WAKE_UPSTREAM_TIMEOUT_MS", 300_000);
 
