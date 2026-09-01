@@ -13,9 +13,8 @@ const {
 } = require("./time_utils");
 
 // 批注 2026-08-10: 与 Gateway 共用同一 DATA_DIR; 未配置时仍落回项目目录，保护旧 VPS/本机部署。
+
 // Render 免费环境强制使用 /tmp/dylan
-const fs = require("fs");
-const path = require("path");
 const DATA_DIR = "/tmp/dylan";
 if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
