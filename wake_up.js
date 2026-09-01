@@ -12,9 +12,15 @@ const {
   zonedWallTimeToDate
 } = require("./time_utils");
 
-// 批注 2026-08-10：与 Gateway 共用同一 DATA_DIR；未配置时仍落回项目目录，保护旧 VPS/本机部署。
-const DATA_DIR = ensureDataDir();
-const TIMELINE_PATH = runtimeFile("enhanced_messages.json");
+// 批注 2026-08-10: 与 Gateway 共用同一 DATA_DIR; 未配置时仍落回项目目录，保护旧 VPS/本机部署。
+// Render 免费环境强制使用 /tmp/dylan
+const fs = require("fs");
+const path = require("path");
+const DATA_DIR = "/tmp/dylan";
+if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+const TIMELINE_PATH = path.join(DATA_DIR, "enhanced_messages.json");
 const PORT = Number(process.env.PORT) || 3000;
 const GATEWAY_BASE_URL = (process.env.GATEWAY_BASE_URL || `http://localhost:${PORT}`).replace(/\/+$/, "");
 const GATEWAY_URL = `${GATEWAY_BASE_URL}/internal/wake-event`;
