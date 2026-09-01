@@ -326,18 +326,7 @@ async function loadTimelineMessages() {
     }
 }
 
-  try {
-    const parsed = JSON.parse(fs.readFileSync(TIMELINE_PATH, "utf-8"));
-    if (!Array.isArray(parsed)) {
-      console.log("enhanced_messages.json 格式错误：顶层不是数组");
-      return null;
-    }
-    return parsed;
-  } catch (err) {
-    console.error("读取 enhanced_messages.json 失败:", err.message);
-    return null;
-  }
-}
+
 
 function getNow() {
   return new Date();
