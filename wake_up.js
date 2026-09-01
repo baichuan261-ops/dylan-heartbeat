@@ -2,6 +2,12 @@ require("dotenv").config({ quiet: true });
 const fs = require("fs");
 const path = require("path");
 const { buildNtfyPayload } = require("./ntfy_priority");
+const { createClient } = require('@supabase/supabase-js');
+
+const supabase = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_KEY
+);
 const { ensureDataDir, runtimeDirectory, runtimeFile } = require("./runtime_paths");
 const { parseChatCompletionResponse } = require("./upstream_response");
 const {
@@ -300,11 +306,25 @@ async function fetchWeatherContext() {
   }
 }
 
-function loadTimelineMessages() {
-  if (!fs.existsSync(TIMELINE_PATH)) {
-    console.log("未找到 enhanced_messages.json");
-    return null;
-  }
+async function loadTimelineMessages() {
+    try {
+        const { data, error } = await supabase
+            .from('timeline')
+            .select('role, content, created_at')
+            .order('created_at', { ascending: true });
+        
+        if (error) throw error;
+        if (!data || data.length === 0) {
+            console.log('⚠️ timeline 表为空');
+            return null;
+        }
+        console.log(`📚 从 Supabase 加载了 ${data.length} 条时间线记录`);
+        return data;
+    } catch (e) {
+        console.log('⚠️ 读取 Supabase timeline 失败:', e.message);
+        return null;
+    }
+}
 
   try {
     const parsed = JSON.parse(fs.readFileSync(TIMELINE_PATH, "utf-8"));
@@ -409,7 +429,7 @@ async function runWakeUp() {
   console.log("开始自动唤醒");
   console.log("==========================\n");
 
-  const messages = loadTimelineMessages();
+  const messages = await loadTimelineMessages();
   if (!messages) return;
 
   const lastUserTime = getLastUserTime(messages);
