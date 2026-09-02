@@ -103,13 +103,24 @@ async function sendPushNotification({ title, body }) {
 
   if (provider === "ntfy") {
     const topic = String(process.env.NTFY_TOPIC || "").trim();
-    if (!topic) return { ok: false, providerLabel: "ntfy", reason: "NTFY_TOPIC 未配置" };
+    if (!topic) {
+      return {
+        ok: false,
+        providerLabel: "ntfy",
+        reason: "NTFY_TOPIC 未配置"
+      };
+    }
 
     const server = (process.env.NTFY_SERVER_URL || "https://ntfy.sh").replace(/\/+$/, "");
+
     const headers = {
       "Content-Type": "application/json"
     };
-    if (process.env.NTFY_TOKEN) headers.Authorization = `Bearer ${process.env.NTFY_TOKEN}`;
+
+    if (process.env.NTFY_TOKEN) {
+      headers.Authorization = `Bearer ${process.env.NTFY_TOKEN}`;
+    }
+
     const payload = buildNtfyPayload({
       topic,
       title,
@@ -124,28 +135,42 @@ async function sendPushNotification({ title, body }) {
       headers,
       body: JSON.stringify(payload)
     });
-   const responseText = await response.text();
 
-console.log(
-  `ntfy HTTP: ${response.status} ${response.statusText || ""}`,
-  responseText
-);
+    const responseText = await response.text();
 
-if (!response.ok) {
-  return {
-    ok: false,
-    providerLabel: "ntfy",
-    reason: responseText || `HTTP ${response.status}`
-  };
-}
+    console.log(
+      `ntfy HTTP: ${response.status} ${response.statusText || ""}`,
+      responseText
+    );
 
-return { ok: true, providerLabel: "ntfy" };
+    if (!response.ok) {
+      return {
+        ok: false,
+        providerLabel: "ntfy",
+        reason: responseText || `HTTP ${response.status}`
+      };
+    }
+
+    return {
+      ok: true,
+      providerLabel: "ntfy"
+    };
+  }
+
   if (provider !== "bark") {
-    return { ok: false, providerLabel: provider || "未知渠道", reason: `不支持的 PUSH_PROVIDER：${provider}` };
+    return {
+      ok: false,
+      providerLabel: provider || "未知渠道",
+      reason: `不支持的 PUSH_PROVIDER：${provider}`
+    };
   }
 
   if (!process.env.BARK_KEY) {
-    return { ok: false, providerLabel: "Bark", reason: "Bark Key 未配置" };
+    return {
+      ok: false,
+      providerLabel: "Bark",
+      reason: "Bark Key 未配置"
+    };
   }
 
   const barkPayload = {
@@ -164,17 +189,26 @@ return { ok: true, providerLabel: "ntfy" };
 
   const responseText = await response.text();
   let result = {};
+
   try {
     result = JSON.parse(responseText);
   } catch {}
+
   console.log("\nBark Result:\n", result || responseText);
 
   if (!response.ok || (result.code && result.code !== 200)) {
-    return { ok: false, providerLabel: "Bark", reason: result.message || `HTTP ${response.status}` };
+    return {
+      ok: false,
+      providerLabel: "Bark",
+      reason: result.message || `HTTP ${response.status}`
+    };
   }
-  return { ok: true, providerLabel: "Bark" };
-}
 
+  return {
+    ok: true,
+    providerLabel: "Bark"
+  };
+}
 function isDayTime(date = new Date()) {
   const hour = getHourInTimeZone(date, TIME_ZONE);
   const start = readNumberEnv("WAKE_DAY_START_HOUR", 10, { min: 0, max: 23 });
