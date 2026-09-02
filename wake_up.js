@@ -124,13 +124,22 @@ async function sendPushNotification({ title, body }) {
       headers,
       body: JSON.stringify(payload)
     });
-    const responseText = await response.text();
-    if (!response.ok) {
-      return { ok: false, providerLabel: "ntfy", reason: responseText || `HTTP ${response.status}` };
-    }
-    return { ok: true, providerLabel: "ntfy" };
-  }
+   const responseText = await response.text();
 
+console.log(
+  `ntfy HTTP: ${response.status} ${response.statusText || ""}`,
+  responseText
+);
+
+if (!response.ok) {
+  return {
+    ok: false,
+    providerLabel: "ntfy",
+    reason: responseText || `HTTP ${response.status}`
+  };
+}
+
+return { ok: true, providerLabel: "ntfy" };
   if (provider !== "bark") {
     return { ok: false, providerLabel: provider || "未知渠道", reason: `不支持的 PUSH_PROVIDER：${provider}` };
   }
