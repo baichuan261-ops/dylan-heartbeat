@@ -1,0 +1,21 @@
+name: Render Keep Alive
+
+on:
+  schedule:
+    - cron: "*/30 0-15 * * *"
+    - cron: "*/10 16-23 * * *"
+
+  workflow_dispatch:
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Wake Render
+        run: |
+          echo "Waking Render service..."
+          curl -fsS --max-time 30 \
+            "https://lin-heartbeat.onrender.com/healthz"
+          echo ""
+          echo "Render responded successfully."
