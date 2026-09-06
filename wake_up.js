@@ -29,7 +29,6 @@ const {
 } = require("./time_utils");
 
 // 批注 2026-08-10：与 Gateway 共用同一 DATA_DIR；未配置时仍落回项目目录，保护旧 VPS/本机部署。
-
 // Render 免费环境强制使用 /tmp/dylan
 const DATA_DIR = "/tmp/dylan";
 
@@ -74,44 +73,36 @@ const WAKE_UPSTREAM_TIMEOUT_MS =
     300000
   );
 
-const RECENT_CONTEXT_MESSAGE_LIMIT =
+// 最近上下文不再默认塞 30 条。
+// 这里故意保持较小，避免高频重复内容淹没真正的新变化。
+const WAKE_HISTORY_MESSAGE_LIMIT =
   readNumberEnv(
-    "HEARTBEAT_RECENT_CONTEXT_MESSAGES",
-    16,
-    {
-      min: 6,
-      max: 40
-    }
+    "WAKE_HISTORY_MESSAGE_LIMIT",
+    18,
+    { min: 6, max: 40 }
   );
 
-const RECENT_CHANGE_MESSAGE_LIMIT =
+// 用于“最近变化”判断的消息数量。
+const WAKE_CHANGE_MESSAGE_LIMIT =
   readNumberEnv(
-    "HEARTBEAT_RECENT_CHANGE_MESSAGES",
-    8,
-    {
-      min: 4,
-      max: 20
-    }
+    "WAKE_CHANGE_MESSAGE_LIMIT",
+    10,
+    { min: 4, max: 20 }
   );
 
-const RECENT_DIARY_LIMIT =
+// 普通上下文最大字符数。
+const WAKE_HISTORY_MAX_CHARS =
   readNumberEnv(
-    "HEARTBEAT_RECENT_DIARY_LIMIT",
-    6,
-    {
-      min: 1,
-      max: 20
-    }
+    "WAKE_HISTORY_MAX_CHARS",
+    24000,
+    { min: 4000, max: 60000 }
   );
 
-const DIARY_DUPLICATE_WINDOW_HOURS =
-  readNumberEnv(
-    "HEARTBEAT_DIARY_DUPLICATE_WINDOW_HOURS",
-    24,
-    {
-      min: 1,
-      max: 168
-    }
+// Gemini 安全降级时不携带聊天历史。
+const WAKE_SAFE_RETRY_ENABLED =
+  readBooleanEnv(
+    "WAKE_SAFE_RETRY_ENABLED",
+    true
   );
 
 
@@ -176,7 +167,7 @@ function getDiaryTimeString(date = new Date()) {
 }
 
 
-// 批注 2026-07-11：日记只接受模型显式输出的 [DIARY] 块，避免把普通推送内容误写进本地日记。
+// 日记只接受模型显式输出的 [DIARY] 块。
 function extractDiaryFromResponse(text) {
   const diaryBlocks = [];
 
@@ -206,15 +197,8 @@ function extractDiaryFromResponse(text) {
 }
 
 
-// ========================
-// 日记重复保护
-// ========================
-//
-// Heartbeat 的日记和“是否推送”是两个独立判断。
-// 但如果模型连续几次记录几乎相同的内容，代码层面也进行一次轻量拦截，
-// 防止高频聊天细节被不断写进日记。
-//
-
+// 防止模型连续写完全相同的日记。
+// 只在本地当前运行环境中做轻量保护，不影响长期记忆。
 function normalizeDiaryText(text) {
   return String(text || "")
     .toLowerCase()
@@ -226,218 +210,82 @@ function normalizeDiaryText(text) {
 }
 
 
-function calculateDiarySimilarity(a, b) {
-  const x =
-    normalizeDiaryText(a);
+function isRecentDuplicateDiary(content) {
+  const clean =
+    normalizeDiaryText(content);
 
-  const y =
-    normalizeDiaryText(b);
-
-  if (!x || !y) {
-    return 0;
+  if (!clean || !fs.existsSync(DIARY_DIR_PATH)) {
+    return false;
   }
 
-  if (x === y) {
-    return 1;
-  }
-
-  if (
-    x.length < 10 ||
-    y.length < 10
-  ) {
-    return 0;
-  }
-
-  if (
-    x.includes(y) ||
-    y.includes(x)
-  ) {
-    return (
-      Math.min(
-        x.length,
-        y.length
-      ) /
-      Math.max(
-        x.length,
-        y.length
-      )
-    );
-  }
-
-  const makeBigrams =
-    text => {
-      const result =
-        new Set();
-
-      for (
-        let i = 0;
-        i < text.length - 1;
-        i++
-      ) {
-        result.add(
-          text.slice(i, i + 2)
-        );
-      }
-
-      return result;
-    };
-
-  const setA =
-    makeBigrams(x);
-
-  const setB =
-    makeBigrams(y);
-
-  if (
-    !setA.size ||
-    !setB.size
-  ) {
-    return 0;
-  }
-
-  let intersection = 0;
-
-  for (
-    const item of setA
-  ) {
-    if (setB.has(item)) {
-      intersection++;
-    }
-  }
-
-  const union =
-    new Set([
-      ...setA,
-      ...setB
-    ]).size;
-
-  return union
-    ? intersection / union
-    : 0;
-}
-
-
-function loadRecentDiaryEntries() {
-  if (
-    !readBooleanEnv(
-      "DIARY_ENABLED",
-      true
-    )
-  ) {
-    return [];
-  }
+  let files = [];
 
   try {
-    if (
-      !fs.existsSync(
-        DIARY_DIR_PATH
-      )
-    ) {
-      return [];
-    }
-
-    const files =
-      fs.readdirSync(
-        DIARY_DIR_PATH
-      )
-      .filter(
-        file =>
-          file.endsWith(".md")
+    files = fs
+      .readdirSync(DIARY_DIR_PATH)
+      .filter(name =>
+        /^\d{4}-\d{2}-\d{2}\.md$/.test(name)
       )
       .sort()
       .reverse()
-      .slice(0, 7);
+      .slice(0, 3);
+  } catch {
+    return false;
+  }
 
-    const entries = [];
-
-    for (
-      const file of files
-    ) {
-      const fullPath =
-        path.join(
-          DIARY_DIR_PATH,
-          file
-        );
-
-      const content =
+  for (const file of files) {
+    try {
+      const text =
         fs.readFileSync(
-          fullPath,
+          path.join(DIARY_DIR_PATH, file),
           "utf-8"
         );
 
-      const matches =
-        content.match(
-          /##\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s*\n\n([\s\S]*?)(?=\n\n##\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}|\s*$)/g
-        ) || [];
+      const normalized =
+        normalizeDiaryText(text);
 
-      for (
-        const match of matches
+      if (
+        normalized.length >= 20 &&
+        (
+          normalized.includes(clean) ||
+          clean.includes(normalized)
+        )
       ) {
-        const cleaned =
-          match
-            .replace(
-              /^##\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s*\n\n/,
-              ""
-            )
-            .trim();
+        return true;
+      }
 
-        if (cleaned) {
-          entries.push({
-            content: cleaned,
-            file
-          });
+      if (
+        clean.length >= 30 &&
+        normalized.length >= 30
+      ) {
+        const a = new Set();
+
+        for (
+          let i = 0;
+          i < clean.length - 1;
+          i++
+        ) {
+          a.add(clean.slice(i, i + 2));
+        }
+
+        let common = 0;
+
+        for (
+          const pair of a
+        ) {
+          if (normalized.includes(pair)) {
+            common++;
+          }
+        }
+
+        if (
+          a.size > 0 &&
+          common / a.size >= 0.85
+        ) {
+          return true;
         }
       }
-    }
-
-    return entries
-      .slice(-RECENT_DIARY_LIMIT)
-      .reverse();
-
-  } catch (err) {
-    console.log(
-      "⚠️ 读取近期日记失败：",
-      err.message
-    );
-
-    return [];
-  }
-}
-
-
-function isRecentDuplicateDiary(content) {
-  const cleanContent =
-    String(content || "").trim();
-
-  if (!cleanContent) {
-    return false;
-  }
-
-  const recentEntries =
-    loadRecentDiaryEntries();
-
-  if (!recentEntries.length) {
-    return false;
-  }
-
-  for (
-    const entry of recentEntries
-  ) {
-    const similarity =
-      calculateDiarySimilarity(
-        cleanContent,
-        entry.content
-      );
-
-    if (
-      similarity >= 0.82
-    ) {
-      console.log(
-        `⚠️ 检测到近期重复日记，相似度 ${(similarity * 100).toFixed(1)}%`
-      );
-
-      return true;
-    }
+    } catch {}
   }
 
   return false;
@@ -461,17 +309,11 @@ function appendDiaryEntry(content) {
   const cleanContent =
     String(content || "").trim();
 
-  if (!cleanContent) {
-    return false;
-  }
+  if (!cleanContent) return false;
 
-  if (
-    isRecentDuplicateDiary(
-      cleanContent
-    )
-  ) {
+  if (isRecentDuplicateDiary(cleanContent)) {
     console.log(
-      "本次日记与近期日记高度重复，不保存"
+      "⚠️ 日记与近期记录高度重复，本次不保存"
     );
 
     return false;
@@ -504,7 +346,10 @@ function appendDiaryEntry(content) {
 }
 
 
-// 批注 2026-07-11：推送层扩展为 Bark/ntfy；默认仍走 Bark，保护旧部署不改 .env 也能继续运行。
+// ========================
+// Push
+// ========================
+
 async function sendPushNotification({
   title,
   body
@@ -625,8 +470,7 @@ async function sendPushNotification({
           PUSH_TIMEOUT_MS
         ),
       headers: {
-        "Content-Type":
-          "application/json"
+        "Content-Type": "application/json"
       },
       body: JSON.stringify(
         barkPayload
@@ -670,6 +514,10 @@ async function sendPushNotification({
   };
 }
 
+
+// ========================
+// Time
+// ========================
 
 function isDayTime(date = new Date()) {
   const hour =
@@ -749,6 +597,10 @@ function getCheckIntervalMinutes(
       );
 }
 
+
+// ========================
+// Content
+// ========================
 
 function normalizeContentToText(content) {
   if (typeof content === "string") {
@@ -867,6 +719,10 @@ function summarizeWakeMessages(
   };
 }
 
+
+// ========================
+// Weather
+// ========================
 
 function weatherCodeText(code) {
   const table = {
@@ -1063,6 +919,10 @@ async function fetchWeatherContext() {
 }
 
 
+// ========================
+// Timeline
+// ========================
+
 async function loadTimelineMessages() {
   try {
     const {
@@ -1239,7 +1099,7 @@ async function saveHeartbeatPushLog(
 
 
 // ========================
-// 轻量重复推送检查
+// Push similarity
 // ========================
 
 function normalizePushText(text) {
@@ -1271,7 +1131,6 @@ function calculatePushSimilarity(
     return 1;
   }
 
-  // 很短的内容不做模糊判断，避免误杀
   if (
     x.length < 6 ||
     y.length < 6
@@ -1412,6 +1271,10 @@ function isRecentDuplicatePush(
 }
 
 
+// ========================
+// Wake time
+// ========================
+
 function getNow() {
   return new Date();
 }
@@ -1508,9 +1371,6 @@ function getLastUserTime(
           msg.content
         );
 
-      // 批注 2026-07-15：兼容 Kelivo 时间前缀 "YYYY-MM-DDHH:mm"；
-      // 旧的 "YYYY-MM-DD HH:mm" 仍然可用，避免无空格时间导致 wake-up 误判没有用户时间。
-
       const parsed =
         parseTimelineTimestamp(
           content
@@ -1518,6 +1378,20 @@ function getLastUserTime(
 
       if (parsed) {
         return parsed;
+      }
+
+      // 如果 content 没有时间前缀，则使用数据库 created_at。
+      if (msg.created_at) {
+        const created =
+          new Date(msg.created_at);
+
+        if (
+          Number.isFinite(
+            created.getTime()
+          )
+        ) {
+          return created;
+        }
       }
     }
   }
@@ -1539,236 +1413,184 @@ function stripPosition(
 
 
 // ========================
-// Heartbeat 上下文构建
+// 最近变化提取
 // ========================
-//
-// 这里故意不碰长期记忆压缩。
-// 长期记忆继续由原来的记忆库机制负责。
-//
-// Heartbeat 自己只增加一个“短期变化观察层”：
-// 最近几条消息里发生了什么变化？
-//
-// 重要：
-// 高频出现的细节不等于重要变化。
-// 只有 2～5 条消息，也可能出现：
-// - 计划发生变化
-// - 情绪/态度发生变化
-// - 新结果出现
-// - 一个未解决问题突然有进展
-// - 用户明确提出新的需求/担忧
-// - 对某件事的关注重点发生转移
-//
-// 这些短期变化不需要等到长期记忆压缩后才可以被 Heartbeat 看到。
-//
+
+function cleanTimelineContentForWake(
+  content
+) {
+  let text =
+    normalizeContentToText(
+      content
+    );
+
+  if (!text) {
+    return "";
+  }
+
+  // 不把完整 Memories 再次塞进 Heartbeat。
+  if (
+    text.includes("## Memories")
+  ) {
+    text =
+      text.split(
+        "## Memories"
+      )[0];
+  }
+
+  text =
+    text.replace(
+      /记忆库使用策略[\s\S]*$/i,
+      ""
+    );
+
+  return text.trim();
+}
 
 
-function prepareHistoryMessages(
+function getRecentConversationMessages(
   messages
 ) {
-  return stripPosition(
-    messages
-  )
+  return messages
     .filter(
       msg =>
         msg.role !== "system"
     )
     .filter(msg => {
-      const c =
-        normalizeContentToText(
+      const content =
+        cleanTimelineContentForWake(
           msg.content
         );
 
-      return (
-        !c.includes(
-          "<memories>"
-        ) &&
-        !c.includes(
-          "记忆库使用策略"
-        )
-      );
-    });
+      return Boolean(content);
+    })
+    .slice(
+      -WAKE_HISTORY_MESSAGE_LIMIT
+    );
+}
+
+
+function getRecentChangeMessages(
+  messages
+) {
+  return messages
+    .filter(
+      msg =>
+        msg.role !== "system"
+    )
+    .filter(msg => {
+      const content =
+        cleanTimelineContentForWake(
+          msg.content
+        );
+
+      return Boolean(content);
+    })
+    .slice(
+      -WAKE_CHANGE_MESSAGE_LIMIT
+    );
 }
 
 
 function formatConversationMessages(
   messages,
   userDisplay,
-  aiDisplay
+  aiDisplay,
+  maxChars
 ) {
   const parts = [];
+  let chars = 0;
 
   for (
-    const msg of messages
+    const msg of [...messages].reverse()
   ) {
     const role =
       msg.role === "user"
         ? userDisplay
         : aiDisplay;
 
-    let content =
-      normalizeContentToText(
+    const content =
+      cleanTimelineContentForWake(
         msg.content
       );
-
-    if (
-      content.includes(
-        "## Memories"
-      )
-    ) {
-      content =
-        content.split(
-          "## Memories"
-        )[0];
-    }
-
-    content =
-      content.trim();
 
     if (!content) {
       continue;
     }
 
-    const timestamp =
+    const part =
+      `[${role}] ${content}`;
+
+    if (
+      chars + part.length >
+      maxChars
+    ) {
+      break;
+    }
+
+    parts.unshift(part);
+    chars += part.length;
+  }
+
+  return parts.join("\n\n");
+}
+
+
+function formatRecentChanges(
+  messages,
+  userDisplay,
+  aiDisplay
+) {
+  if (!messages.length) {
+    return "暂无足够的新消息用于判断短期变化。";
+  }
+
+  const parts = [];
+
+  for (const msg of messages) {
+    const role =
+      msg.role === "user"
+        ? userDisplay
+        : aiDisplay;
+
+    const content =
+      cleanTimelineContentForWake(
+        msg.content
+      );
+
+    if (!content) continue;
+
+    const time =
       msg.created_at
         ? formatDateTimeInTimeZone(
-            new Date(
-              msg.created_at
-            ),
+            new Date(msg.created_at),
             TIME_ZONE
           )
-        : "";
+        : "未知时间";
 
     parts.push(
-      timestamp
-        ? `[${timestamp}] [${role}] ${content}`
-        : `[${role}] ${content}`
+      `[${time}] ${role}：${content}`
     );
   }
 
-  return parts.join(
-    "\n\n"
-  );
+  return parts.join("\n\n");
 }
 
 
-function buildRecentStateContext(
-  messages,
-  userDisplay,
-  aiDisplay
-) {
-  const prepared =
-    prepareHistoryMessages(
-      messages
-    );
-
-  const recent =
-    prepared.slice(
-      -RECENT_CHANGE_MESSAGE_LIMIT
-    );
-
-  if (!recent.length) {
-    return "暂无足够的近期聊天记录用于判断短期变化。";
-  }
-
-  const text =
-    formatConversationMessages(
-      recent,
-      userDisplay,
-      aiDisplay
-    );
-
-  return `
-以下是最近 ${recent.length} 条消息。
-
-这部分不是长期记忆，也不是完整聊天记录。
-它的唯一作用是帮助你观察“最近有没有发生变化”。
-
-不要统计某个词出现了多少次。
-不要因为某个细节反复出现，就把它自动判断成重要。
-
-请重点观察这些消息之间的前后变化：
-- 用户的计划是否改变；
-- 用户的态度、情绪或关注重点是否发生变化；
-- 某个问题是否从“普通聊天”变成了“需要跟进的问题”；
-- 是否出现新的结果、决定、事件或明确需求；
-- 是否有之前未解决的事情出现了新进展；
-- 是否出现值得主动联系的上下文转折。
-
-如果最近只是重复讨论同一个事情，没有新的变化，就应该明确认为“没有新的短期变化”。
-
-最近短期记录：
-
-${text}
-`.trim();
-}
-
-
-function buildRecentConversationContext(
-  messages,
-  userDisplay,
-  aiDisplay
-) {
-  const prepared =
-    prepareHistoryMessages(
-      messages
-    );
-
-  const recent =
-    prepared.slice(
-      -RECENT_CONTEXT_MESSAGE_LIMIT
-    );
-
-  if (!recent.length) {
-    return "暂无近期聊天记录。";
-  }
-
-  return formatConversationMessages(
-    recent,
-    userDisplay,
-    aiDisplay
-  );
-}
-
-
-function buildRecentDiaryContext() {
-  const entries =
-    loadRecentDiaryEntries();
-
-  if (!entries.length) {
-    return "暂无近期日记。";
-  }
-
-  return entries
-    .map(
-      entry =>
-        `- ${entry.content}`
-    )
-    .join("\n");
-}
-
+// ========================
+// Wake Prompt
+// ========================
 
 function buildWakePrompt(
   currentTime,
   diffMinutes,
-  weatherContext = "",
-  recentStateContext = "",
-  recentDiaryContext = ""
+  weatherContext = ""
 ) {
-  // 优先读取独立的提示词文件（推荐方式）
   const promptFile =
     path.join(
       __dirname,
       "wake_prompt.txt"
     );
-
-  const replacements = {
-    currentTime,
-    diffMinutes,
-    weatherContext,
-    weather: weatherContext,
-    recentStateContext,
-    recentDiaryContext
-  };
 
   if (
     fs.existsSync(promptFile)
@@ -1779,206 +1601,403 @@ function buildWakePrompt(
         "utf-8"
       );
 
-    let result =
-      template;
-
-    for (
-      const [key, value] of Object.entries(
-        replacements
+    return template
+      .replace(
+        /\$\{currentTime\}/g,
+        currentTime
       )
-    ) {
-      result =
-        result.replace(
-          new RegExp(
-            `\\$\\{${key}\\}`,
-            "g"
-          ),
-          value || ""
-        );
-    }
-
-    return result;
+      .replace(
+        /\$\{diffMinutes\}/g,
+        diffMinutes
+      )
+      .replace(
+        /\$\{weatherContext\}/g,
+        weatherContext
+      )
+      .replace(
+        /\$\{weather\}/g,
+        weatherContext
+      );
   }
 
-  // 如果文件不存在，尝试从环境变量读取（兼容旧配置）
   if (
     process.env.WAKE_PROMPT_TEMPLATE
   ) {
-    let result =
-      process.env.WAKE_PROMPT_TEMPLATE
-        .replace(
-          /\\\n/g,
-          "\n"
-        );
-
-    for (
-      const [key, value] of Object.entries(
-        replacements
+    return process.env.WAKE_PROMPT_TEMPLATE
+      .replace(
+        /\\\n/g,
+        "\n"
       )
-    ) {
-      result =
-        result.replace(
-          new RegExp(
-            `\\$\\{${key}\\}`,
-            "g"
-          ),
-          value || ""
-        );
-    }
-
-    return result;
+      .replace(
+        /\$\{currentTime\}/g,
+        currentTime
+      )
+      .replace(
+        /\$\{diffMinutes\}/g,
+        diffMinutes
+      )
+      .replace(
+        /\$\{weatherContext\}/g,
+        weatherContext
+      )
+      .replace(
+        /\$\{weather\}/g,
+        weatherContext
+      );
   }
 
-  // 默认理智版本（开源通用），可自行修改提示词
   return `
 ## 最高优先级规则
 
-这是一次后台自动唤醒，不是用户发起的对话。
+这是一次后台自动唤醒。
 
-你的任务不是“找一个理由发消息”，而是判断：
-“现在是否真的存在一个值得主动告诉用户/关心用户的事情？”
+用户没有给你发送新消息。
 
-不要因为 Heartbeat 被触发，就强行创造一个话题。
+你的任务不是回复用户刚刚说的话，而是判断：
 
-## 唤醒信息
+“最近是否真的发生了值得我主动告诉用户/关心用户的变化？”
+
+重点不是“最近聊了什么”，而是“最近发生了什么变化”。
+
+高频出现的细节不等于重要。
+
+如果最近只是反复出现同一个普通细节，而没有新的结果、变化、决定、情绪变化或未解决事项，不要因为它容易想到就再次推送。
+
+如果只有 2～5 条新消息，但这几条消息形成了明显的状态变化，也可以认为有价值。
+
+如果没有足够明确的价值，只输出：
+
+[NO_ACTION]
+
+## 当前唤醒信息
 
 - 当前时间：${currentTime}
 - 距离用户最后一条消息：${diffMinutes} 分钟
 
-${weatherContext ? `${weatherContext}\n` : ""}
+${weatherContext ? weatherContext : ""}
 
-## 核心判断原则
+## 判断顺序
 
-重点不是“最近聊了什么”，而是：
+优先关注：
 
-“最近发生了什么变化？”
+1. 最近发生的明确状态变化。
+2. 用户刚刚出现的新决定、新计划、新结果。
+3. 原本未解决的问题出现了新的进展。
+4. 用户的态度、情绪或关注重点出现了明确变化。
+5. 值得自然跟进的重要事项。
+6. 普通日常聊天。
 
-请优先寻找真正的状态变化，而不是高频重复细节。
+不要因为某个细节在最近消息里出现很多次，就自动认为它重要。
 
-一个变化即使只有 2～5 条新消息，也可以成立。
+请特别检查：
 
-例如：
-- 用户改变了计划；
-- 用户做出了新的决定；
-- 用户原本担心的事情有了结果；
-- 一个未解决的问题出现新进展；
-- 用户的关注重点发生明显变化；
-- 用户明确表达了新的需求、困扰或重要情绪变化。
+“如果把最近反复出现的那个细节删掉，最近还有没有一个独立成立的理由值得主动联系用户？”
 
-反过来：
+如果答案是否定的，就不要推送。
 
-如果一个细节今天被反复提及很多次，但没有新的变化，那么“出现很多次”本身不能证明它值得再次推送。
+## 不允许的推理
 
-## 信息价值排序
+不能因为用户暂时没有回复，就推断：
 
-优先考虑：
-
-1. 最近发生的明确变化
-2. 尚未解决、且值得跟进的事情
-3. 新结果、新计划、新决定、新问题
-4. 明确的情绪或态度变化
-5. 有现实价值的时间、天气或环境信息
-6. 普通日常聊天
-
-低优先级：
-- 单纯重复的聊天细节
-- 已经说过、没有新进展的内容
-- 只因为最近出现频率高而被注意到的内容
-- 没有证据的猜测
-
-## 禁止脑补
-
-不要因为用户没有回复，就推断：
 - 用户睡着了；
-- 用户在刷手机；
+- 用户正在刷手机；
 - 用户正在上课；
 - 用户明天有什么安排；
-- 用户现在是什么情绪；
-- 用户现实中正在做什么。
+- 用户现在心情如何；
+- 用户现实生活中发生了什么。
 
 除非聊天记录中有明确证据。
 
-“用户没有回复”本身不是一个值得推送的事件。
+不要为了让推送显得自然而制造一个不存在的理由。
 
-## 推送判断
+## 最近主动推送
 
-发送前必须在内部检查：
+最近主动推送只能用于判断短期重复。
 
-1. 现在到底发生了什么新变化？
-2. 这个变化是否比普通闲聊更值得主动联系？
-3. 如果删掉最近那个最高频的聊天细节，我还有没有充分理由发这条消息？
-4. 最近是否已经用类似角度联系过用户？
-5. 这条消息是在回应真实变化，还是只是为了让 Heartbeat 看起来“有动作”？
+某个话题被推送过，不代表以后永远不能再提。
 
-如果答案更接近后者，就输出：
-
-[NO_ACTION]
-
-不要为了避免沉默而发送消息。
-
-## 最近短期变化
-
-${recentStateContext}
-
-## 近期日记
-
-${recentDiaryContext}
-
-近期日记只用于判断：
-- 是否已经记录过同一件事情；
-- 是否存在真正的新变化。
-
-不要因为日记里出现过某个主题，就继续围绕该主题生成内容。
+但如果最近刚刚推送过，而且现在没有新的信息、变化或结果，不要机械重复。
 
 ## 日记规则
 
-日记和推送是两个独立判断。
+[DIARY] 不是“不推送时的默认出口”。
 
-不要把“本次不推送”理解成“那就写一篇日记”。
+只有在最近聊天中存在明确、值得长期记录的新事实或新变化时，才写日记。
 
-只有在最近确实出现了值得长期保留的事实、变化、决定、进展或明确事件时，才写 [DIARY]。
+不要因为本次没有推送，就顺手写一篇日记。
 
-日记必须：
-- 基于聊天中明确出现的事实；
-- 不猜测用户现实状态；
-- 不为了凑日记而重复高频细节；
-- 不把一次普通闲聊包装成重大事件；
-- 如果没有值得记录的新内容，可以完全不写日记。
+不要猜测用户没有说过的事情。
 
-即使你决定写日记，也不代表必须推送。
-即使你决定推送，也不代表必须写日记。
+不要把普通重复聊天内容写成重大事件。
 
-## 输出格式
+## 输出
 
-如果不值得主动联系：
+如果没有值得主动联系的内容：
 
 [NO_ACTION]
 
-可以在后面附带不超过 20 字的内部原因。
+如果有值得主动联系的内容：
 
-如果值得主动联系：
-直接输出想发送给用户的自然语言内容。
+直接输出自然的推送内容。
 
-第一行可以作为标题，第二行作为正文。
+可以第一行作为标题，第二行作为正文。
 
-不要解释你的判断过程。
-不要输出“我分析了一下”。
-不要输出“根据 Heartbeat”。
-不要输出 JSON。
-
-如果需要写日记：
+如果确实有值得记录的新变化，可以额外输出：
 
 [DIARY]
-只写值得记录的事实或变化
+明确记录这次新变化。
 [/DIARY]
 
-[DIARY] 可以和推送同时存在，也可以单独存在。
+日记和推送是两个独立判断。
 
-最重要的是：
-不要为了输出而输出。
-`.trim();
+不要为了写日记而推送。
+
+不要为了推送而制造变化。
+`;
 }
 
+
+// ========================
+// Gemini 安全错误判断
+// ========================
+
+function isProhibitedContentError(
+  status,
+  responseText
+) {
+  const text =
+    String(responseText || "")
+      .toLowerCase();
+
+  return (
+    Number(status) === 400 &&
+    (
+      text.includes(
+        "prohibited_content"
+      ) ||
+      text.includes(
+        "prompt_blocked"
+      ) ||
+      text.includes(
+        "request blocked by gemini"
+      )
+    )
+  );
+}
+
+
+// ========================
+// 调用模型
+// ========================
+
+async function callWakeModel(
+  wakeMessages
+) {
+  const response =
+    await fetch(
+      process.env.TARGET_API_URL,
+      {
+        method: "POST",
+
+        signal:
+          AbortSignal.timeout(
+            WAKE_UPSTREAM_TIMEOUT_MS
+          ),
+
+        headers: {
+          "Content-Type":
+            "application/json",
+
+          Authorization:
+            `Bearer ${process.env.TARGET_API_KEY}`
+        },
+
+        body: JSON.stringify({
+          model:
+            process.env.MODEL_NAME,
+
+          messages:
+            wakeMessages,
+
+          temperature: 0.7,
+
+          top_p: 0.9,
+
+          stream: false
+        })
+      }
+    );
+
+  const responseText =
+    await response.text();
+
+  let data;
+
+  try {
+    data =
+      parseChatCompletionResponse(
+        responseText,
+        response.headers.get(
+          "content-type"
+        ) || ""
+      );
+  } catch (error) {
+    if (
+      isProhibitedContentError(
+        response.status,
+        responseText
+      )
+    ) {
+      const err =
+        new Error(
+          "Gemini PROHIBITED_CONTENT"
+        );
+
+      err.code =
+        "PROHIBITED_CONTENT";
+
+      err.status =
+        response.status;
+
+      err.responseText =
+        responseText;
+
+      throw err;
+    }
+
+    throw new Error(
+      `模型响应无法解析（HTTP ${response.status}）：${
+        error.message ||
+        responseText.slice(
+          0,
+          300
+        )
+      }`
+    );
+  }
+
+  if (!response.ok) {
+    if (
+      isProhibitedContentError(
+        response.status,
+        responseText
+      )
+    ) {
+      const err =
+        new Error(
+          "Gemini PROHIBITED_CONTENT"
+        );
+
+      err.code =
+        "PROHIBITED_CONTENT";
+
+      err.status =
+        response.status;
+
+      err.responseText =
+        responseText;
+
+      throw err;
+    }
+
+    throw new Error(
+      `模型请求失败（HTTP ${response.status}）：${responseText.slice(0, 300)}`
+    );
+  }
+
+  return data;
+}
+
+
+// ========================
+// 安全降级模型请求
+// ========================
+
+async function callSafeWakeRetry(
+  currentTime,
+  diffMinutes,
+  weatherContext
+) {
+  console.log(
+    "\n⚠️ 首次唤醒请求被 Gemini 内容安全策略拦截。"
+  );
+
+  console.log(
+    "🛡️ 启动安全降级：不再发送最近聊天原文、推送历史和短期变化原文。"
+  );
+
+  const safePrompt = `
+你正在执行一次后台 Heartbeat 检查。
+
+当前时间：${currentTime}
+距离用户最后一条消息：${diffMinutes} 分钟。
+
+${weatherContext || ""}
+
+请只根据你当前已经拥有的长期上下文和一般判断，决定是否存在一个明确、低风险、值得主动联系用户的理由。
+
+重要规则：
+
+- 不要猜测用户现实状态。
+- 不要因为用户没有回复而推断用户正在睡觉、刷手机、上课等。
+- 不要重复普通细节。
+- 高频话题不等于重要。
+- 如果没有明确理由，必须输出 [NO_ACTION]。
+- 不要写日记。
+- 不要输出任何敏感内容。
+
+只输出以下两种结果之一：
+
+[NO_ACTION]
+
+或者一条非常简短、自然、普通的主动消息。
+`;
+
+  const messages = [
+    {
+      role: "system",
+      content: safePrompt
+    },
+    {
+      role: "user",
+      content:
+        "请完成这次后台 Heartbeat 判断。"
+    }
+  ];
+
+  try {
+    return await callWakeModel(
+      messages
+    );
+  } catch (error) {
+    if (
+      error?.code ===
+      "PROHIBITED_CONTENT"
+    ) {
+      console.log(
+        "🛡️ Gemini 安全降级请求仍被拦截，本轮静默。"
+      );
+
+      return {
+        choices: [
+          {
+            message: {
+              content:
+                "[NO_ACTION]"
+            }
+          }
+        ]
+      };
+    }
+
+    throw error;
+  }
+}
+
+
+// ========================
+// 主唤醒
+// ========================
 
 async function runWakeUp() {
   console.log(
@@ -2035,10 +2054,6 @@ async function runWakeUp() {
     return;
   }
 
-  // ========================
-  // 加载最近 Heartbeat 推送日志
-  // ========================
-
   const recentPushLogs =
     await loadRecentHeartbeatPushLogs();
 
@@ -2050,6 +2065,18 @@ async function runWakeUp() {
   const weatherContext =
     await fetchWeatherContext();
 
+  const wakePrompt =
+    buildWakePrompt(
+      getChinaTimeString(),
+      diffMinutes,
+      weatherContext
+    );
+
+  const cleanMessages =
+    stripPosition(
+      messages
+    );
+
   const userDisplay =
     process.env.USER_DISPLAY_NAME ||
     "用户";
@@ -2059,100 +2086,40 @@ async function runWakeUp() {
     "AI";
 
   // ========================
-  // 短期变化上下文
+  // 最近聊天
   // ========================
 
-  const recentStateContext =
-    buildRecentStateContext(
-      messages,
-      userDisplay,
-      aiDisplay
+  const recentConversation =
+    getRecentConversationMessages(
+      cleanMessages
     );
-
-  const recentConversationContext =
-    buildRecentConversationContext(
-      messages,
-      userDisplay,
-      aiDisplay
-    );
-
-  const recentDiaryContext =
-    buildRecentDiaryContext();
-
-  const wakePrompt =
-    buildWakePrompt(
-      getChinaTimeString(),
-      diffMinutes,
-      weatherContext,
-      recentStateContext,
-      recentDiaryContext
-    );
-
-  const cleanMessages =
-    stripPosition(
-      messages
-    );
-
-  // ========================
-  // Heartbeat 最近上下文
-  // ========================
-  //
-  // 以前固定取最后 30 条。
-  //
-  // 现在缩小为真正的“近期上下文”，
-  // 避免大量旧内容和重复细节不断干扰判断。
-  //
-  // 数据库仍然保留完整 timeline。
-  // 这只是 Heartbeat 本次判断看到的窗口。
-  //
-
-  const historyCandidates =
-    cleanMessages
-      .filter(
-        msg =>
-          msg.role !== "system"
-      )
-      .filter(msg => {
-        const c =
-          normalizeContentToText(
-            msg.content
-          );
-
-        return (
-          !c.includes(
-            "<memories>"
-          ) &&
-          !c.includes(
-            "记忆库使用策略"
-          )
-        );
-      })
-      .slice(
-        -RECENT_CONTEXT_MESSAGE_LIMIT
-      );
 
   const historyText =
-    recentConversationContext;
-
-  const baseSystemPrompt =
-    cleanMessages.find(
-      msg =>
-        msg.role === "system"
+    formatConversationMessages(
+      recentConversation,
+      userDisplay,
+      aiDisplay,
+      WAKE_HISTORY_MAX_CHARS
     );
 
-  const cleanSP =
-    baseSystemPrompt
-      ? normalizeContentToText(
-          baseSystemPrompt.content
-        )
-          .split(
-            "## Memories"
-          )[0]
-          .trim()
-      : "";
+  // ========================
+  // 最近变化
+  // ========================
+
+  const recentChangeMessages =
+    getRecentChangeMessages(
+      cleanMessages
+    );
+
+  const recentChangesText =
+    formatRecentChanges(
+      recentChangeMessages,
+      userDisplay,
+      aiDisplay
+    );
 
   // ========================
-  // 最近主动推送规则
+  // Heartbeat 推送规则
   // ========================
 
   const heartbeatPushInstruction = `
@@ -2162,135 +2129,67 @@ ${recentPushContext}
 
 ---
 
-这些记录是“近期沟通过什么”的参考，不是永久禁区。
+这些记录只用于判断短期重复。
 
-它们有三个作用：
+它们不是永久禁止列表。
 
-1. 防止短时间内机械重复同一句话或同一个切入角度。
-2. 帮助判断某件事是否已经被主动联系过。
-3. 如果真的出现了新的变化，可以重新讨论同一个主题。
+如果过去推送过某个话题，但现在出现了真正的新变化，可以重新联系。
 
-重要：
+如果过去刚刚推送过相同内容，而最近没有任何新信息，则不要机械重复。
 
-“最近推送过某个主题”
-不等于
-“以后不能再提这个主题”。
-
-但如果没有新的变化，也不要只是换几个词重新发送。
-
-特别注意：
-
-不要把近期推送日志当成一个简单的关键词黑名单。
-
-你应该判断“事件是否变化”，而不是只判断“词有没有变化”。
-
-例如：
-
-昨天只是聊到一件普通小事，
-今天如果没有任何新进展，
-就没有必要为了 Heartbeat 的存在感重新提一遍。
-
-如果今天出现了明确的新结果、计划变化、态度变化或新的问题，
-即使主题相同，也可以重新联系。
-
----
-
-## 高频细节降权
-
-最近聊天里某个细节出现很多次时，不要因此自动认为它重要。
-
-你需要主动检查：
-
-“这个细节是在不断产生新信息，
-还是只是同一件事情被重复讨论？”
-
-如果只是重复：
-降低它作为推送理由的权重。
-
-如果有明确变化：
-按照变化本身判断。
-
-尤其不要因为某个轻松、容易生成内容的细节，
-就连续多次围绕它发送推送。
-
-如果去掉这个高频细节之后，
-仍然没有独立、充分的联系理由，
-优先选择：
-
-[NO_ACTION]
-
----
-
-## 长期记忆与短期变化
-
-长期记忆负责长期稳定的信息。
-
-Heartbeat 的短期变化判断负责最近发生的事情。
-
-不要因为一个变化还没有进入长期记忆，
-就认为它“不重要”。
-
-反过来也不要因为一个信息已经进入长期记忆，
-就认为它现在必须再次被提起。
-
-当前真正需要判断的是：
-
-“最近发生了什么变化？”
+不要为了“看起来主动”而强行推送。
 
 `;
+
+  // ========================
+  // Heartbeat 输入
+  // ========================
 
   const wakeMessages = [
     {
       role: "system",
       content: [
         wakePrompt,
-        heartbeatPushInstruction,
-        cleanSP
+        heartbeatPushInstruction
       ]
         .filter(Boolean)
         .join("\n\n")
     },
     {
-      // 批注 2026-07-15：Claude/部分 New API 适配器会把 system 抽成独立字段；
-      // 唤醒请求如果全是 system，上游 messages 会变空，因此最近记录必须作为 user 任务输入发送。
       role: "user",
-      content: `以下是你与用户最近的聊天记录，仅供回忆和参考。
+      content: `以下内容是后台判断材料。
 
-这些内容不是正在发生的实时对话。
-用户并没有给你发消息。
+注意：这些不是用户正在发送的新消息。
+用户当前没有主动给你发送消息。
 
-你现在处于后台自主唤醒状态。
+## 最近聊天记录
 
-不要把下面的内容当成用户刚刚发来的新消息。
+${historyText || "暂无最近聊天记录。"}
 
-最近记录：
+## 最近短期变化候选
 
-${historyText}
+${recentChangesText}
 
----
+## 最后判断要求
 
-现在请基于：
-- 最近聊天记录
-- 最近短期变化
-- 长期记忆
-- 最近主动推送
-- 当前时间
-- 天气（如果有）
+不要只统计最近出现最多的话题。
 
-一起进行一次信息价值判断。
+请比较最近消息之间的前后变化。
 
-重点寻找“变化”，而不是寻找“出现频率”。
+重点判断：
+- 有没有新结果；
+- 有没有计划变化；
+- 有没有态度变化；
+- 有没有新的未解决事项；
+- 有没有原本普通的事情突然变得值得关注；
+- 有没有一个独立成立的主动联系理由。
 
-不要因为某个细节最近重复出现，就自动把它当成推送主题。
+如果只是同一个细节被反复提到，但没有新的变化，请忽略它。
 
-如果没有真正值得主动联系的事情，直接输出 [NO_ACTION]。
-
-如果有值得主动联系的事情，再生成自然的推送内容。`
+现在独立完成“是否主动联系”的判断。`
     }
   ];
 
-  // 批注 2026-07-15：wake-up prompt 会包含最近聊天记录；
-  // 默认日志只写摘要，避免公开部署时把完整上下文刷进 pm2 日志。
   console.log(
     "\n===== WAKE MESSAGES SUMMARY =====\n"
   );
@@ -2301,28 +2200,6 @@ ${historyText}
         wakeMessages
       )
     )
-  );
-
-  console.log(
-    JSON.stringify({
-      recent_context_messages:
-        historyCandidates.length,
-
-      recent_change_messages:
-        Math.min(
-          historyCandidates.length,
-          RECENT_CHANGE_MESSAGE_LIMIT
-        ),
-
-      recent_push_logs:
-        recentPushLogs.length,
-
-      recent_diary_entries:
-        loadRecentDiaryEntries().length,
-
-      diff_minutes:
-        diffMinutes
-    })
   );
 
   if (
@@ -2337,72 +2214,41 @@ ${historyText}
     return;
   }
 
-  const response =
-    await fetch(
-      process.env.TARGET_API_URL,
-      {
-        method: "POST",
-
-        // 批注 2026-08-10：上游只建连不结束时，旧循环永远不会安排下一次检查；
-        // 五分钟默认总超时只作兜底，可由 WAKE_UPSTREAM_TIMEOUT_MS 调整。
-        signal:
-          AbortSignal.timeout(
-            WAKE_UPSTREAM_TIMEOUT_MS
-          ),
-
-        headers: {
-          "Content-Type":
-            "application/json",
-
-          Authorization:
-            `Bearer ${process.env.TARGET_API_KEY}`
-        },
-
-        body: JSON.stringify({
-          model:
-            process.env.MODEL_NAME,
-
-          messages:
-            wakeMessages,
-
-          temperature: 0.8,
-
-          top_p: 0.95,
-
-          stream: false
-        })
-      }
-    );
-
-  const responseText =
-    await response.text();
-
   let data;
 
   try {
     data =
-      parseChatCompletionResponse(
-        responseText,
-        response.headers.get(
-          "content-type"
-        ) || ""
+      await callWakeModel(
+        wakeMessages
       );
-  } catch (error) {
-    throw new Error(
-      `模型响应无法解析（HTTP ${response.status}）：${
-        error.message ||
-        responseText.slice(
-          0,
-          300
-        )
-      }`
-    );
-  }
 
-  if (!response.ok) {
-    throw new Error(
-      `模型请求失败（HTTP ${response.status}）：${responseText.slice(0, 300)}`
-    );
+  } catch (error) {
+    // Gemini PROHIBITED_CONTENT：
+    // 不让整个 Heartbeat runtime 进入错误循环。
+    if (
+      error?.code ===
+      "PROHIBITED_CONTENT"
+    ) {
+      if (
+        !WAKE_SAFE_RETRY_ENABLED
+      ) {
+        console.log(
+          "⚠️ Gemini PROHIBITED_CONTENT，安全降级已关闭，本轮静默。"
+        );
+
+        return;
+      }
+
+      data =
+        await callSafeWakeRetry(
+          getChinaTimeString(),
+          diffMinutes,
+          weatherContext
+        );
+
+    } else {
+      throw error;
+    }
   }
 
   const rawAiText =
@@ -2433,17 +2279,8 @@ ${historyText}
       rawAiText
     );
 
-  // ========================
-  // 日记独立处理
-  // ========================
-  //
-  // 注意：
-  // 这里不再把“只写日记”当成 Heartbeat 的一种推送结果。
-  //
-  // 日记只是独立的记录行为。
-  // 模型是否推送，由下面的 aiText 单独决定。
-  //
-
+  // 日记与推送是独立逻辑。
+  // [NO_ACTION] 并不会自动产生“只写日记”的事件。
   const diarySaved =
     appendDiaryEntry(
       diaryResult.diaryContent
@@ -2461,21 +2298,19 @@ ${historyText}
 
     eventContent =
       diarySaved
-        ? `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：模型未生成主动推送）`
-        : `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：模型空回复）`;
+        ? `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：存在可记录变化但没有主动联系价值）`
+        : `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：模型未产生主动联系内容）`;
 
-  // 判断 AI 是否明确要静默
   } else if (
-    /^\[NO_ACTION\]\s*(.{0,20})?/i.test(
+    /^\[NO_ACTION\]\s*(.{0,30})?/i.test(
       aiText
     )
   ) {
     const noActionMatch =
       aiText.match(
-        /^\[NO_ACTION\]\s*(.{0,20})?/i
+        /^\[NO_ACTION\]\s*(.{0,30})?/i
       );
 
-    // AI 选择不发送推送
     console.log(
       "\nAI 选择不发送推送\n"
     );
@@ -2507,7 +2342,6 @@ ${historyText}
         : `（${getLocalTimeString()} 自动唤醒：本次未发送推送）`;
 
   } else {
-    // 没有 [NO_ACTION] 就视为想发推送
     console.log(
       "\nAI 选择发送推送\n"
     );
@@ -2515,7 +2349,6 @@ ${historyText}
     let barkText =
       aiText;
 
-    // 如果 AI 还是写了 [BARK] ... [/BARK] 标签，就剥掉
     const barkMatch =
       barkText.match(
         /\[BARK\]([\s\S]*?)\[\/BARK\]/i
@@ -2542,7 +2375,6 @@ ${historyText}
           .trim();
     }
 
-    // 清洗“标题：”、“正文：”前缀（如果有）
     barkText =
       barkText
         .replace(
@@ -2554,7 +2386,6 @@ ${historyText}
           ""
         );
 
-    // 按行处理
     const lines =
       barkText
         .split("\n")
@@ -2595,7 +2426,6 @@ ${historyText}
         lines[1].trim();
 
     } else {
-      // ≥3 行：第一行标题，剩余用空格拼接成正文
       title =
         lines[0].trim();
 
@@ -2609,14 +2439,12 @@ ${historyText}
     }
 
     if (!eventContent) {
-      // 保护：截断过长正文，兼容 Bark 和 ntfy 的移动端展示。
       const safeBody =
         body.length > 500
           ? body.substring(0, 497) +
             "..."
           : body;
 
-      // 若标题为空或以数字开头，加个前缀，可自行修改
       let safeTitle =
         title || "来自伴侣";
 
@@ -2629,10 +2457,6 @@ ${historyText}
           "来自伴侣｜" +
           safeTitle;
       }
-
-      // ========================
-      // 代码级近期重复检查
-      // ========================
 
       const isDuplicate =
         isRecentDuplicatePush(
@@ -2667,7 +2491,6 @@ ${historyText}
             `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：${pushResult.providerLabel} 推送失败：${pushResult.reason}）`;
 
         } else {
-          // 只有真正发送成功后才写入推送日志
           await saveHeartbeatPushLog(
             `${safeTitle}｜${safeBody}`,
             "heartbeat"
@@ -2681,7 +2504,7 @@ ${historyText}
   }
 
   // ========================
-  // 记录本次 Heartbeat 事件
+  // Gateway 记录 Heartbeat 事件
   // ========================
 
   try {
@@ -2724,9 +2547,11 @@ ${historyText}
 }
 
 
-// 从第一个有效坐标开始，所有路径都指向同一处。此阈值已锁定。
+// ========================
+// 定时检查
+// ========================
+
 function getCheckIntervalMs() {
-  // 批注 2026-06-26：公开版允许用户在管理页调整唤醒检查频率；默认值保持旧版白天10分钟、夜间2小时。
   return (
     getCheckIntervalMinutes(
       new Date()
@@ -2739,7 +2564,6 @@ function getCheckIntervalMs() {
 
 async function scheduleNextCheck() {
   try {
-    // 发送心跳
     try {
       await fetch(
         HEARTBEAT_URL,
@@ -2765,7 +2589,6 @@ async function scheduleNextCheck() {
 }
 
 
-// 潮水记得第一次没过礁石的时间。之后每一次涨落，都是同一片海在确认边界。
 // 启动第一次检查（延迟10秒）
 setTimeout(
   scheduleNextCheck,
@@ -2783,9 +2606,6 @@ console.log(
 
 console.log(
   JSON.stringify({
-    event:
-      "wake_runtime_config_summary",
-
     railway: Boolean(
       process.env.RAILWAY_ENVIRONMENT ||
       process.env.RAILWAY_PROJECT_ID ||
@@ -2818,22 +2638,19 @@ console.log(
         process.env.NTFY_TOPIC
       ),
 
+    safe_retry_enabled:
+      WAKE_SAFE_RETRY_ENABLED,
+
+    wake_history_limit:
+      WAKE_HISTORY_MESSAGE_LIMIT,
+
+    wake_change_limit:
+      WAKE_CHANGE_MESSAGE_LIMIT,
+
     data_dir_ready:
       fs.existsSync(
         DATA_DIR
-      ),
-
-    heartbeat_recent_context_messages:
-      RECENT_CONTEXT_MESSAGE_LIMIT,
-
-    heartbeat_recent_change_messages:
-      RECENT_CHANGE_MESSAGE_LIMIT,
-
-    heartbeat_recent_diary_limit:
-      RECENT_DIARY_LIMIT,
-
-    heartbeat_diary_duplicate_window_hours:
-      DIARY_DUPLICATE_WINDOW_HOURS
+      )
   })
 );
 
