@@ -74,6 +74,46 @@ const WAKE_UPSTREAM_TIMEOUT_MS =
     300000
   );
 
+const RECENT_CONTEXT_MESSAGE_LIMIT =
+  readNumberEnv(
+    "HEARTBEAT_RECENT_CONTEXT_MESSAGES",
+    16,
+    {
+      min: 6,
+      max: 40
+    }
+  );
+
+const RECENT_CHANGE_MESSAGE_LIMIT =
+  readNumberEnv(
+    "HEARTBEAT_RECENT_CHANGE_MESSAGES",
+    8,
+    {
+      min: 4,
+      max: 20
+    }
+  );
+
+const RECENT_DIARY_LIMIT =
+  readNumberEnv(
+    "HEARTBEAT_RECENT_DIARY_LIMIT",
+    6,
+    {
+      min: 1,
+      max: 20
+    }
+  );
+
+const DIARY_DUPLICATE_WINDOW_HOURS =
+  readNumberEnv(
+    "HEARTBEAT_DIARY_DUPLICATE_WINDOW_HOURS",
+    24,
+    {
+      min: 1,
+      max: 168
+    }
+  );
+
 
 function readPositiveTimeout(key, fallback) {
   const value = Number(process.env[key]);
@@ -166,6 +206,244 @@ function extractDiaryFromResponse(text) {
 }
 
 
+// ========================
+// 日记重复保护
+// ========================
+//
+// Heartbeat 的日记和“是否推送”是两个独立判断。
+// 但如果模型连续几次记录几乎相同的内容，代码层面也进行一次轻量拦截，
+// 防止高频聊天细节被不断写进日记。
+//
+
+function normalizeDiaryText(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(
+      /[，。！？、,.!?：:；;（）()【】[\]「」『』“”"'‘’…—\-_ \s]/g,
+      ""
+    )
+    .trim();
+}
+
+
+function calculateDiarySimilarity(a, b) {
+  const x =
+    normalizeDiaryText(a);
+
+  const y =
+    normalizeDiaryText(b);
+
+  if (!x || !y) {
+    return 0;
+  }
+
+  if (x === y) {
+    return 1;
+  }
+
+  if (
+    x.length < 10 ||
+    y.length < 10
+  ) {
+    return 0;
+  }
+
+  if (
+    x.includes(y) ||
+    y.includes(x)
+  ) {
+    return (
+      Math.min(
+        x.length,
+        y.length
+      ) /
+      Math.max(
+        x.length,
+        y.length
+      )
+    );
+  }
+
+  const makeBigrams =
+    text => {
+      const result =
+        new Set();
+
+      for (
+        let i = 0;
+        i < text.length - 1;
+        i++
+      ) {
+        result.add(
+          text.slice(i, i + 2)
+        );
+      }
+
+      return result;
+    };
+
+  const setA =
+    makeBigrams(x);
+
+  const setB =
+    makeBigrams(y);
+
+  if (
+    !setA.size ||
+    !setB.size
+  ) {
+    return 0;
+  }
+
+  let intersection = 0;
+
+  for (
+    const item of setA
+  ) {
+    if (setB.has(item)) {
+      intersection++;
+    }
+  }
+
+  const union =
+    new Set([
+      ...setA,
+      ...setB
+    ]).size;
+
+  return union
+    ? intersection / union
+    : 0;
+}
+
+
+function loadRecentDiaryEntries() {
+  if (
+    !readBooleanEnv(
+      "DIARY_ENABLED",
+      true
+    )
+  ) {
+    return [];
+  }
+
+  try {
+    if (
+      !fs.existsSync(
+        DIARY_DIR_PATH
+      )
+    ) {
+      return [];
+    }
+
+    const files =
+      fs.readdirSync(
+        DIARY_DIR_PATH
+      )
+      .filter(
+        file =>
+          file.endsWith(".md")
+      )
+      .sort()
+      .reverse()
+      .slice(0, 7);
+
+    const entries = [];
+
+    for (
+      const file of files
+    ) {
+      const fullPath =
+        path.join(
+          DIARY_DIR_PATH,
+          file
+        );
+
+      const content =
+        fs.readFileSync(
+          fullPath,
+          "utf-8"
+        );
+
+      const matches =
+        content.match(
+          /##\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s*\n\n([\s\S]*?)(?=\n\n##\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}|\s*$)/g
+        ) || [];
+
+      for (
+        const match of matches
+      ) {
+        const cleaned =
+          match
+            .replace(
+              /^##\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s*\n\n/,
+              ""
+            )
+            .trim();
+
+        if (cleaned) {
+          entries.push({
+            content: cleaned,
+            file
+          });
+        }
+      }
+    }
+
+    return entries
+      .slice(-RECENT_DIARY_LIMIT)
+      .reverse();
+
+  } catch (err) {
+    console.log(
+      "⚠️ 读取近期日记失败：",
+      err.message
+    );
+
+    return [];
+  }
+}
+
+
+function isRecentDuplicateDiary(content) {
+  const cleanContent =
+    String(content || "").trim();
+
+  if (!cleanContent) {
+    return false;
+  }
+
+  const recentEntries =
+    loadRecentDiaryEntries();
+
+  if (!recentEntries.length) {
+    return false;
+  }
+
+  for (
+    const entry of recentEntries
+  ) {
+    const similarity =
+      calculateDiarySimilarity(
+        cleanContent,
+        entry.content
+      );
+
+    if (
+      similarity >= 0.82
+    ) {
+      console.log(
+        `⚠️ 检测到近期重复日记，相似度 ${(similarity * 100).toFixed(1)}%`
+      );
+
+      return true;
+    }
+  }
+
+  return false;
+}
+
+
 function appendDiaryEntry(content) {
   if (
     !readBooleanEnv(
@@ -183,7 +461,21 @@ function appendDiaryEntry(content) {
   const cleanContent =
     String(content || "").trim();
 
-  if (!cleanContent) return false;
+  if (!cleanContent) {
+    return false;
+  }
+
+  if (
+    isRecentDuplicateDiary(
+      cleanContent
+    )
+  ) {
+    console.log(
+      "本次日记与近期日记高度重复，不保存"
+    );
+
+    return false;
+  }
 
   fs.mkdirSync(
     DIARY_DIR_PATH,
@@ -333,7 +625,8 @@ async function sendPushNotification({
           PUSH_TIMEOUT_MS
         ),
       headers: {
-        "Content-Type": "application/json"
+        "Content-Type":
+          "application/json"
       },
       body: JSON.stringify(
         barkPayload
@@ -1245,10 +1538,221 @@ function stripPosition(
 }
 
 
+// ========================
+// Heartbeat 上下文构建
+// ========================
+//
+// 这里故意不碰长期记忆压缩。
+// 长期记忆继续由原来的记忆库机制负责。
+//
+// Heartbeat 自己只增加一个“短期变化观察层”：
+// 最近几条消息里发生了什么变化？
+//
+// 重要：
+// 高频出现的细节不等于重要变化。
+// 只有 2～5 条消息，也可能出现：
+// - 计划发生变化
+// - 情绪/态度发生变化
+// - 新结果出现
+// - 一个未解决问题突然有进展
+// - 用户明确提出新的需求/担忧
+// - 对某件事的关注重点发生转移
+//
+// 这些短期变化不需要等到长期记忆压缩后才可以被 Heartbeat 看到。
+//
+
+
+function prepareHistoryMessages(
+  messages
+) {
+  return stripPosition(
+    messages
+  )
+    .filter(
+      msg =>
+        msg.role !== "system"
+    )
+    .filter(msg => {
+      const c =
+        normalizeContentToText(
+          msg.content
+        );
+
+      return (
+        !c.includes(
+          "<memories>"
+        ) &&
+        !c.includes(
+          "记忆库使用策略"
+        )
+      );
+    });
+}
+
+
+function formatConversationMessages(
+  messages,
+  userDisplay,
+  aiDisplay
+) {
+  const parts = [];
+
+  for (
+    const msg of messages
+  ) {
+    const role =
+      msg.role === "user"
+        ? userDisplay
+        : aiDisplay;
+
+    let content =
+      normalizeContentToText(
+        msg.content
+      );
+
+    if (
+      content.includes(
+        "## Memories"
+      )
+    ) {
+      content =
+        content.split(
+          "## Memories"
+        )[0];
+    }
+
+    content =
+      content.trim();
+
+    if (!content) {
+      continue;
+    }
+
+    const timestamp =
+      msg.created_at
+        ? formatDateTimeInTimeZone(
+            new Date(
+              msg.created_at
+            ),
+            TIME_ZONE
+          )
+        : "";
+
+    parts.push(
+      timestamp
+        ? `[${timestamp}] [${role}] ${content}`
+        : `[${role}] ${content}`
+    );
+  }
+
+  return parts.join(
+    "\n\n"
+  );
+}
+
+
+function buildRecentStateContext(
+  messages,
+  userDisplay,
+  aiDisplay
+) {
+  const prepared =
+    prepareHistoryMessages(
+      messages
+    );
+
+  const recent =
+    prepared.slice(
+      -RECENT_CHANGE_MESSAGE_LIMIT
+    );
+
+  if (!recent.length) {
+    return "暂无足够的近期聊天记录用于判断短期变化。";
+  }
+
+  const text =
+    formatConversationMessages(
+      recent,
+      userDisplay,
+      aiDisplay
+    );
+
+  return `
+以下是最近 ${recent.length} 条消息。
+
+这部分不是长期记忆，也不是完整聊天记录。
+它的唯一作用是帮助你观察“最近有没有发生变化”。
+
+不要统计某个词出现了多少次。
+不要因为某个细节反复出现，就把它自动判断成重要。
+
+请重点观察这些消息之间的前后变化：
+- 用户的计划是否改变；
+- 用户的态度、情绪或关注重点是否发生变化；
+- 某个问题是否从“普通聊天”变成了“需要跟进的问题”；
+- 是否出现新的结果、决定、事件或明确需求；
+- 是否有之前未解决的事情出现了新进展；
+- 是否出现值得主动联系的上下文转折。
+
+如果最近只是重复讨论同一个事情，没有新的变化，就应该明确认为“没有新的短期变化”。
+
+最近短期记录：
+
+${text}
+`.trim();
+}
+
+
+function buildRecentConversationContext(
+  messages,
+  userDisplay,
+  aiDisplay
+) {
+  const prepared =
+    prepareHistoryMessages(
+      messages
+    );
+
+  const recent =
+    prepared.slice(
+      -RECENT_CONTEXT_MESSAGE_LIMIT
+    );
+
+  if (!recent.length) {
+    return "暂无近期聊天记录。";
+  }
+
+  return formatConversationMessages(
+    recent,
+    userDisplay,
+    aiDisplay
+  );
+}
+
+
+function buildRecentDiaryContext() {
+  const entries =
+    loadRecentDiaryEntries();
+
+  if (!entries.length) {
+    return "暂无近期日记。";
+  }
+
+  return entries
+    .map(
+      entry =>
+        `- ${entry.content}`
+    )
+    .join("\n");
+}
+
+
 function buildWakePrompt(
   currentTime,
   diffMinutes,
-  weatherContext = ""
+  weatherContext = "",
+  recentStateContext = "",
+  recentDiaryContext = ""
 ) {
   // 优先读取独立的提示词文件（推荐方式）
   const promptFile =
@@ -1256,6 +1760,15 @@ function buildWakePrompt(
       __dirname,
       "wake_prompt.txt"
     );
+
+  const replacements = {
+    currentTime,
+    diffMinutes,
+    weatherContext,
+    weather: weatherContext,
+    recentStateContext,
+    recentDiaryContext
+  };
 
   if (
     fs.existsSync(promptFile)
@@ -1266,69 +1779,204 @@ function buildWakePrompt(
         "utf-8"
       );
 
-    return template
-      .replace(
-        /\$\{currentTime\}/g,
-        currentTime
+    let result =
+      template;
+
+    for (
+      const [key, value] of Object.entries(
+        replacements
       )
-      .replace(
-        /\$\{diffMinutes\}/g,
-        diffMinutes
-      )
-      .replace(
-        /\$\{weatherContext\}/g,
-        weatherContext
-      )
-      .replace(
-        /\$\{weather\}/g,
-        weatherContext
-      );
+    ) {
+      result =
+        result.replace(
+          new RegExp(
+            `\\$\\{${key}\\}`,
+            "g"
+          ),
+          value || ""
+        );
+    }
+
+    return result;
   }
 
   // 如果文件不存在，尝试从环境变量读取（兼容旧配置）
   if (
     process.env.WAKE_PROMPT_TEMPLATE
   ) {
-    return process.env.WAKE_PROMPT_TEMPLATE
-      .replace(
-        /\\\n/g,
-        "\n"
+    let result =
+      process.env.WAKE_PROMPT_TEMPLATE
+        .replace(
+          /\\\n/g,
+          "\n"
+        );
+
+    for (
+      const [key, value] of Object.entries(
+        replacements
       )
-      .replace(
-        /\$\{currentTime\}/g,
-        currentTime
-      )
-      .replace(
-        /\$\{diffMinutes\}/g,
-        diffMinutes
-      )
-      .replace(
-        /\$\{weatherContext\}/g,
-        weatherContext
-      )
-      .replace(
-        /\$\{weather\}/g,
-        weatherContext
-      );
+    ) {
+      result =
+        result.replace(
+          new RegExp(
+            `\\$\\{${key}\\}`,
+            "g"
+          ),
+          value || ""
+        );
+    }
+
+    return result;
   }
 
   // 默认理智版本（开源通用），可自行修改提示词
   return `
 ## 最高优先级规则
-1. 这是一次后台自动唤醒，不是用户发起的对话。你没有收到任何新消息。
-2. 你的唯一任务是决定是否主动联系用户。不能生成对话回复。
-3. 输出格式必须严格遵守以下二选一。
+
+这是一次后台自动唤醒，不是用户发起的对话。
+
+你的任务不是“找一个理由发消息”，而是判断：
+“现在是否真的存在一个值得主动告诉用户/关心用户的事情？”
+
+不要因为 Heartbeat 被触发，就强行创造一个话题。
 
 ## 唤醒信息
+
 - 当前时间：${currentTime}
 - 距离用户最后一条消息：${diffMinutes} 分钟
-${weatherContext ? `\n${weatherContext}\n` : ""}
+
+${weatherContext ? `${weatherContext}\n` : ""}
+
+## 核心判断原则
+
+重点不是“最近聊了什么”，而是：
+
+“最近发生了什么变化？”
+
+请优先寻找真正的状态变化，而不是高频重复细节。
+
+一个变化即使只有 2～5 条新消息，也可以成立。
+
+例如：
+- 用户改变了计划；
+- 用户做出了新的决定；
+- 用户原本担心的事情有了结果；
+- 一个未解决的问题出现新进展；
+- 用户的关注重点发生明显变化；
+- 用户明确表达了新的需求、困扰或重要情绪变化。
+
+反过来：
+
+如果一个细节今天被反复提及很多次，但没有新的变化，那么“出现很多次”本身不能证明它值得再次推送。
+
+## 信息价值排序
+
+优先考虑：
+
+1. 最近发生的明确变化
+2. 尚未解决、且值得跟进的事情
+3. 新结果、新计划、新决定、新问题
+4. 明确的情绪或态度变化
+5. 有现实价值的时间、天气或环境信息
+6. 普通日常聊天
+
+低优先级：
+- 单纯重复的聊天细节
+- 已经说过、没有新进展的内容
+- 只因为最近出现频率高而被注意到的内容
+- 没有证据的猜测
+
+## 禁止脑补
+
+不要因为用户没有回复，就推断：
+- 用户睡着了；
+- 用户在刷手机；
+- 用户正在上课；
+- 用户明天有什么安排；
+- 用户现在是什么情绪；
+- 用户现实中正在做什么。
+
+除非聊天记录中有明确证据。
+
+“用户没有回复”本身不是一个值得推送的事件。
+
+## 推送判断
+
+发送前必须在内部检查：
+
+1. 现在到底发生了什么新变化？
+2. 这个变化是否比普通闲聊更值得主动联系？
+3. 如果删掉最近那个最高频的聊天细节，我还有没有充分理由发这条消息？
+4. 最近是否已经用类似角度联系过用户？
+5. 这条消息是在回应真实变化，还是只是为了让 Heartbeat 看起来“有动作”？
+
+如果答案更接近后者，就输出：
+
+[NO_ACTION]
+
+不要为了避免沉默而发送消息。
+
+## 最近短期变化
+
+${recentStateContext}
+
+## 近期日记
+
+${recentDiaryContext}
+
+近期日记只用于判断：
+- 是否已经记录过同一件事情；
+- 是否存在真正的新变化。
+
+不要因为日记里出现过某个主题，就继续围绕该主题生成内容。
+
+## 日记规则
+
+日记和推送是两个独立判断。
+
+不要把“本次不推送”理解成“那就写一篇日记”。
+
+只有在最近确实出现了值得长期保留的事实、变化、决定、进展或明确事件时，才写 [DIARY]。
+
+日记必须：
+- 基于聊天中明确出现的事实；
+- 不猜测用户现实状态；
+- 不为了凑日记而重复高频细节；
+- 不把一次普通闲聊包装成重大事件；
+- 如果没有值得记录的新内容，可以完全不写日记。
+
+即使你决定写日记，也不代表必须推送。
+即使你决定推送，也不代表必须写日记。
 
 ## 输出格式
-- 如果想联系用户，直接写你想说的话。系统会自动打包成手机推送发送。可以是一句话，也可以第一行作为标题、第二行作为正文。
-- 如果不想联系，只输出：[NO_ACTION]，可附带简短原因（10字以内）。
-- 如果你想写日记，可以额外输出 [DIARY]...[/DIARY]。只有想写时才写，不必每次都写。
-`;
+
+如果不值得主动联系：
+
+[NO_ACTION]
+
+可以在后面附带不超过 20 字的内部原因。
+
+如果值得主动联系：
+直接输出想发送给用户的自然语言内容。
+
+第一行可以作为标题，第二行作为正文。
+
+不要解释你的判断过程。
+不要输出“我分析了一下”。
+不要输出“根据 Heartbeat”。
+不要输出 JSON。
+
+如果需要写日记：
+
+[DIARY]
+只写值得记录的事实或变化
+[/DIARY]
+
+[DIARY] 可以和推送同时存在，也可以单独存在。
+
+最重要的是：
+不要为了输出而输出。
+`.trim();
 }
 
 
@@ -1402,11 +2050,42 @@ async function runWakeUp() {
   const weatherContext =
     await fetchWeatherContext();
 
+  const userDisplay =
+    process.env.USER_DISPLAY_NAME ||
+    "用户";
+
+  const aiDisplay =
+    process.env.AI_DISPLAY_NAME ||
+    "AI";
+
+  // ========================
+  // 短期变化上下文
+  // ========================
+
+  const recentStateContext =
+    buildRecentStateContext(
+      messages,
+      userDisplay,
+      aiDisplay
+    );
+
+  const recentConversationContext =
+    buildRecentConversationContext(
+      messages,
+      userDisplay,
+      aiDisplay
+    );
+
+  const recentDiaryContext =
+    buildRecentDiaryContext();
+
   const wakePrompt =
     buildWakePrompt(
       getChinaTimeString(),
       diffMinutes,
-      weatherContext
+      weatherContext,
+      recentStateContext,
+      recentDiaryContext
     );
 
   const cleanMessages =
@@ -1414,8 +2093,19 @@ async function runWakeUp() {
       messages
     );
 
-  // 只给后台唤醒模型提供最近一小段历史。
-  // 数据库仍然保留完整 timeline，不影响长期记录。
+  // ========================
+  // Heartbeat 最近上下文
+  // ========================
+  //
+  // 以前固定取最后 30 条。
+  //
+  // 现在缩小为真正的“近期上下文”，
+  // 避免大量旧内容和重复细节不断干扰判断。
+  //
+  // 数据库仍然保留完整 timeline。
+  // 这只是 Heartbeat 本次判断看到的窗口。
+  //
+
   const historyCandidates =
     cleanMessages
       .filter(
@@ -1437,71 +2127,12 @@ async function runWakeUp() {
           )
         );
       })
-      .slice(-30);
-
-  const userDisplay =
-    process.env.USER_DISPLAY_NAME ||
-    "用户";
-
-  const aiDisplay =
-    process.env.AI_DISPLAY_NAME ||
-    "AI";
-
-  const historyParts = [];
-
-  let historyChars = 0;
-
-  // 从最新消息开始往前取，确保在字符限制下优先保留最新内容。
-  for (
-    const msg of historyCandidates.reverse()
-  ) {
-    const role =
-      msg.role === "user"
-        ? userDisplay
-        : aiDisplay;
-
-    let content =
-      normalizeContentToText(
-        msg.content
+      .slice(
+        -RECENT_CONTEXT_MESSAGE_LIMIT
       );
 
-    if (
-      content.includes(
-        "## Memories"
-      )
-    ) {
-      content =
-        content.split(
-          "## Memories"
-        )[0];
-    }
-
-    const part =
-      `[${role}] ${content}`;
-
-    const MAX_HISTORY_CHARS =
-      60000;
-
-    if (
-      historyChars +
-        part.length >
-      MAX_HISTORY_CHARS
-    ) {
-      break;
-    }
-
-    historyParts.unshift(
-      part
-    );
-
-    historyChars +=
-      part.length;
-  }
-
   const historyText =
-    historyParts.join(
-      "\n\n"
-    );
+    recentConversationContext;
 
   const baseSystemPrompt =
     cleanMessages.find(
@@ -1520,6 +2151,10 @@ async function runWakeUp() {
           .trim()
       : "";
 
+  // ========================
+  // 最近主动推送规则
+  // ========================
+
   const heartbeatPushInstruction = `
 ## 最近主动推送记录
 
@@ -1527,22 +2162,81 @@ ${recentPushContext}
 
 ---
 
-## 主动推送判断规则
+这些记录是“近期沟通过什么”的参考，不是永久禁区。
 
-你可以根据当前时间、最近聊天记录以及你自己的判断决定是否联系用户。
+它们有三个作用：
 
-最近推送记录只用于避免短时间内发送高度重复的内容。
+1. 防止短时间内机械重复同一句话或同一个切入角度。
+2. 帮助判断某件事是否已经被主动联系过。
+3. 如果真的出现了新的变化，可以重新讨论同一个主题。
 
-不要把某个话题永久列为禁止话题。
+重要：
+
+“最近推送过某个主题”
+不等于
+“以后不能再提这个主题”。
+
+但如果没有新的变化，也不要只是换几个词重新发送。
+
+特别注意：
+
+不要把近期推送日志当成一个简单的关键词黑名单。
+
+你应该判断“事件是否变化”，而不是只判断“词有没有变化”。
 
 例如：
-- 今天中午已经问过“吃饭了吗”，短时间内不要再次用几乎相同的话问。
-- 几小时后可以换一个自然的角度重新关心。
-- 第二天完全可以再次关心吃饭、休息、学习等日常事情。
-- 不要因为过去出现过某个话题，就认为以后永远不能提。
-- 如果最近推送和你现在准备发送的内容高度相似，应当换一个自然的切入点，或者选择 [NO_ACTION]。
 
-你的目标不是刻意避免所有重复，而是避免机械、连续、明显重复的推送。
+昨天只是聊到一件普通小事，
+今天如果没有任何新进展，
+就没有必要为了 Heartbeat 的存在感重新提一遍。
+
+如果今天出现了明确的新结果、计划变化、态度变化或新的问题，
+即使主题相同，也可以重新联系。
+
+---
+
+## 高频细节降权
+
+最近聊天里某个细节出现很多次时，不要因此自动认为它重要。
+
+你需要主动检查：
+
+“这个细节是在不断产生新信息，
+还是只是同一件事情被重复讨论？”
+
+如果只是重复：
+降低它作为推送理由的权重。
+
+如果有明确变化：
+按照变化本身判断。
+
+尤其不要因为某个轻松、容易生成内容的细节，
+就连续多次围绕它发送推送。
+
+如果去掉这个高频细节之后，
+仍然没有独立、充分的联系理由，
+优先选择：
+
+[NO_ACTION]
+
+---
+
+## 长期记忆与短期变化
+
+长期记忆负责长期稳定的信息。
+
+Heartbeat 的短期变化判断负责最近发生的事情。
+
+不要因为一个变化还没有进入长期记忆，
+就认为它“不重要”。
+
+反过来也不要因为一个信息已经进入长期记忆，
+就认为它现在必须再次被提起。
+
+当前真正需要判断的是：
+
+“最近发生了什么变化？”
+
 `;
 
   const wakeMessages = [
@@ -1567,9 +2261,31 @@ ${recentPushContext}
 
 你现在处于后台自主唤醒状态。
 
+不要把下面的内容当成用户刚刚发来的新消息。
+
 最近记录：
 
-${historyText}`
+${historyText}
+
+---
+
+现在请基于：
+- 最近聊天记录
+- 最近短期变化
+- 长期记忆
+- 最近主动推送
+- 当前时间
+- 天气（如果有）
+
+一起进行一次信息价值判断。
+
+重点寻找“变化”，而不是寻找“出现频率”。
+
+不要因为某个细节最近重复出现，就自动把它当成推送主题。
+
+如果没有真正值得主动联系的事情，直接输出 [NO_ACTION]。
+
+如果有值得主动联系的事情，再生成自然的推送内容。`
     }
   ];
 
@@ -1585,6 +2301,28 @@ ${historyText}`
         wakeMessages
       )
     )
+  );
+
+  console.log(
+    JSON.stringify({
+      recent_context_messages:
+        historyCandidates.length,
+
+      recent_change_messages:
+        Math.min(
+          historyCandidates.length,
+          RECENT_CHANGE_MESSAGE_LIMIT
+        ),
+
+      recent_push_logs:
+        recentPushLogs.length,
+
+      recent_diary_entries:
+        loadRecentDiaryEntries().length,
+
+      diff_minutes:
+        diffMinutes
+    })
   );
 
   if (
@@ -1695,6 +2433,17 @@ ${historyText}`
       rawAiText
     );
 
+  // ========================
+  // 日记独立处理
+  // ========================
+  //
+  // 注意：
+  // 这里不再把“只写日记”当成 Heartbeat 的一种推送结果。
+  //
+  // 日记只是独立的记录行为。
+  // 模型是否推送，由下面的 aiText 单独决定。
+  //
+
   const diarySaved =
     appendDiaryEntry(
       diaryResult.diaryContent
@@ -1712,7 +2461,7 @@ ${historyText}`
 
     eventContent =
       diarySaved
-        ? `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：只写日记）`
+        ? `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：模型未生成主动推送）`
         : `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：模型空回复）`;
 
   // 判断 AI 是否明确要静默
@@ -2072,7 +2821,19 @@ console.log(
     data_dir_ready:
       fs.existsSync(
         DATA_DIR
-      )
+      ),
+
+    heartbeat_recent_context_messages:
+      RECENT_CONTEXT_MESSAGE_LIMIT,
+
+    heartbeat_recent_change_messages:
+      RECENT_CHANGE_MESSAGE_LIMIT,
+
+    heartbeat_recent_diary_limit:
+      RECENT_DIARY_LIMIT,
+
+    heartbeat_diary_duplicate_window_hours:
+      DIARY_DUPLICATE_WINDOW_HOURS
   })
 );
 
