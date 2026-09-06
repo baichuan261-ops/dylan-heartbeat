@@ -1,21 +1,36 @@
-name: Render Keep Alive
+name: Keep Render Services Alive
 
 on:
   schedule:
+    # 白天：每 30 分钟唤醒 heartbeat
     - cron: "*/30 0-15 * * *"
+
+    # 晚上：每 10 分钟唤醒 heartbeat
     - cron: "*/10 16-23 * * *"
 
   workflow_dispatch:
 
 jobs:
-  keep-alive:
+  keep-heartbeat-alive:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Wake Render
+      - name: Wake heartbeat
         run: |
-          echo "Waking Render service..."
+          echo "Waking heartbeat service..."
           curl -fsS --max-time 30 \
             "https://lin-heartbeat.onrender.com/healthz"
           echo ""
-          echo "Render responded successfully."
+          echo "Heartbeat responded successfully."
+
+  keep-ntfy-alive:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Wake ntfy
+        run: |
+          echo "Waking ntfy service..."
+          curl -fsS --max-time 30 \
+            "https://ntfy-service.onrender.com/"
+          echo ""
+          echo "ntfy responded successfully."
