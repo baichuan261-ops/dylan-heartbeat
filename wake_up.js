@@ -403,7 +403,191 @@ async function loadTimelineMessages() {
     return null;
   }
 }
+// ========================
+// Heartbeat 最近推送日志
+// ========================
 
+const HEARTBEAT_PUSH_LOG_LIMIT = 10;
+const HEARTBEAT_PUSH_DUPLICATE_WINDOW_MINUTES = 360;
+
+async function loadRecentHeartbeatPushLogs(
+  limit = HEARTBEAT_PUSH_LOG_LIMIT
+) {
+  try {
+    const { data, error } = await supabase
+      .from("heartbeat_push_logs")
+      .select("id, created_at, content, trigger_type")
+      .order("created_at", { ascending: false })
+      .limit(limit);
+
+    if (error) throw error;
+
+    const logs = Array.isArray(data) ? data : [];
+
+    console.log(`📝 加载最近 ${logs.length} 条 Heartbeat 推送记录`);
+
+    return logs;
+  } catch (err) {
+    // 表还没创建时不要让整个 Heartbeat 挂掉
+    console.log(
+      "⚠️ 读取 Heartbeat 推送日志失败:",
+      err.message
+    );
+
+    return [];
+  }
+}
+
+function formatRecentHeartbeatPushLogs(logs = []) {
+  if (!logs.length) {
+    return "暂无最近主动推送记录。";
+  }
+
+  return logs
+    .map(log => {
+      const time = log.created_at
+        ? formatDateTimeInTimeZone(
+            new Date(log.created_at),
+            TIME_ZONE
+          )
+        : "未知时间";
+
+      return `- ${time}：${String(log.content || "").trim()}`;
+    })
+    .join("\n");
+}
+
+async function saveHeartbeatPushLog(
+  content,
+  triggerType = "heartbeat"
+) {
+  const cleanContent = String(content || "").trim();
+
+  if (!cleanContent) return false;
+
+  try {
+    const { error } = await supabase
+      .from("heartbeat_push_logs")
+      .insert({
+        content: cleanContent,
+        trigger_type: triggerType
+      });
+
+    if (error) throw error;
+
+    console.log("📝 Heartbeat 推送日志已保存");
+
+    return true;
+  } catch (err) {
+    console.log(
+      "⚠️ 写入 Heartbeat 推送日志失败:",
+      err.message
+    );
+
+    return false;
+  }
+}
+
+// ========================
+// 轻量重复推送检查
+// ========================
+
+function normalizePushText(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(
+      /[，。！？、,.!?：:；;（）()【】[\]「」『』“”"'‘’…—\-_\s]/g,
+      ""
+    )
+    .trim();
+}
+
+function calculatePushSimilarity(a, b) {
+  const x = normalizePushText(a);
+  const y = normalizePushText(b);
+
+  if (!x || !y) return 0;
+
+  if (x === y) return 1;
+
+  // 很短的内容不做模糊判断，避免误杀
+  if (x.length < 6 || y.length < 6) {
+    return 0;
+  }
+
+  if (x.includes(y) || y.includes(x)) {
+    return (
+      Math.min(x.length, y.length) /
+      Math.max(x.length, y.length)
+    );
+  }
+
+  const makeBigrams = text => {
+    const result = new Set();
+
+    for (let i = 0; i < text.length - 1; i++) {
+      result.add(text.slice(i, i + 2));
+    }
+
+    return result;
+  };
+
+  const setA = makeBigrams(x);
+  const setB = makeBigrams(y);
+
+  if (!setA.size || !setB.size) return 0;
+
+  let intersection = 0;
+
+  for (const item of setA) {
+    if (setB.has(item)) {
+      intersection++;
+    }
+  }
+
+  const union = new Set([...setA, ...setB]).size;
+
+  return union ? intersection / union : 0;
+}
+
+function isRecentDuplicatePush(title, body, logs = []) {
+  const candidate = `${title} ${body}`;
+
+  const now = Date.now();
+
+  const windowMinutes = readNumberEnv(
+    "HEARTBEAT_PUSH_DUPLICATE_WINDOW_MINUTES",
+    HEARTBEAT_PUSH_DUPLICATE_WINDOW_MINUTES,
+    { min: 1 }
+  );
+
+  const windowMs = windowMinutes * 60 * 1000;
+
+  for (const log of logs) {
+    const createdAt = Date.parse(log.created_at);
+
+    if (!Number.isFinite(createdAt)) continue;
+
+    if (now - createdAt > windowMs) {
+      continue;
+    }
+
+    const similarity = calculatePushSimilarity(
+      candidate,
+      log.content
+    );
+
+    if (similarity >= 0.82) {
+      console.log(
+        `⚠️ 检测到近期重复推送，相似度 ${(similarity * 100).toFixed(1)}%`
+      );
+
+      return true;
+    }
+  }
+
+  return false;
+}
 function getNow() {
   return new Date();
 }
