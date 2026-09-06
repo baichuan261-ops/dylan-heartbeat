@@ -1,15 +1,25 @@
 require("dotenv").config({ quiet: true });
+
 const fs = require("fs");
 const path = require("path");
 const { buildNtfyPayload } = require("./ntfy_priority");
-const { createClient } = require('@supabase/supabase-js');
+const { createClient } = require("@supabase/supabase-js");
 
 const supabase = createClient(
-    process.env.SUPABASE_URL,
-    process.env.SUPABASE_KEY
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_KEY
 );
-const { ensureDataDir, runtimeDirectory, runtimeFile } = require("./runtime_paths");
-const { parseChatCompletionResponse } = require("./upstream_response");
+
+const {
+  ensureDataDir,
+  runtimeDirectory,
+  runtimeFile
+} = require("./runtime_paths");
+
+const {
+  parseChatCompletionResponse
+} = require("./upstream_response");
+
 const {
   formatDateTimeInTimeZone,
   getDatePartsInTimeZone,
@@ -18,93 +28,207 @@ const {
   zonedWallTimeToDate
 } = require("./time_utils");
 
-// 批注 2026-08-10: 与 Gateway 共用同一 DATA_DIR; 未配置时仍落回项目目录，保护旧 VPS/本机部署。
+// 批注 2026-08-10：与 Gateway 共用同一 DATA_DIR；未配置时仍落回项目目录，保护旧 VPS/本机部署。
 
 // Render 免费环境强制使用 /tmp/dylan
 const DATA_DIR = "/tmp/dylan";
+
 if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.mkdirSync(DATA_DIR, { recursive: true });
 }
-const TIMELINE_PATH = path.join(DATA_DIR, "enhanced_messages.json");
+
+const TIMELINE_PATH = path.join(
+  DATA_DIR,
+  "enhanced_messages.json"
+);
+
 const PORT = Number(process.env.PORT) || 3000;
-const GATEWAY_BASE_URL = (process.env.GATEWAY_BASE_URL || `http://localhost:${PORT}`).replace(/\/+$/, "");
-const GATEWAY_URL = `${GATEWAY_BASE_URL}/internal/wake-event`;
-const HEARTBEAT_URL = `${GATEWAY_BASE_URL}/internal/heartbeat`;
+
+const GATEWAY_BASE_URL = (
+  process.env.GATEWAY_BASE_URL ||
+  `http://localhost:${PORT}`
+).replace(/\/+$/, "");
+
+const GATEWAY_URL =
+  `${GATEWAY_BASE_URL}/internal/wake-event`;
+
+const HEARTBEAT_URL =
+  `${GATEWAY_BASE_URL}/internal/heartbeat`;
+
 const TIME_ZONE = resolveTimeZone();
+
 const WEATHER_TIMEOUT_MS = 5000;
-const DIARY_DIR_NAME = process.env.DIARY_DIR || "diary";
-const DIARY_DIR_PATH = path.join(DATA_DIR, DIARY_DIR_NAME);
-const PUSH_TIMEOUT_MS = readPositiveTimeout("PUSH_TIMEOUT_MS", 15_000);
-const WAKE_UPSTREAM_TIMEOUT_MS = readPositiveTimeout("WAKE_UPSTREAM_TIMEOUT_MS", 300_000);
+
+const DIARY_DIR_NAME =
+  process.env.DIARY_DIR || "diary";
+
+const DIARY_DIR_PATH =
+  path.join(DATA_DIR, DIARY_DIR_NAME);
+
+const PUSH_TIMEOUT_MS =
+  readPositiveTimeout("PUSH_TIMEOUT_MS", 15000);
+
+const WAKE_UPSTREAM_TIMEOUT_MS =
+  readPositiveTimeout(
+    "WAKE_UPSTREAM_TIMEOUT_MS",
+    300000
+  );
+
 
 function readPositiveTimeout(key, fallback) {
   const value = Number(process.env[key]);
-  return Number.isFinite(value) && value >= 1000 ? Math.floor(value) : fallback;
+
+  return Number.isFinite(value) && value >= 1000
+    ? Math.floor(value)
+    : fallback;
 }
+
 
 function readNumberEnv(key, fallback, options = {}) {
   const value = Number(process.env[key]);
+
   const min = options.min ?? -Infinity;
   const max = options.max ?? Infinity;
-  if (Number.isFinite(value) && value >= min && value <= max) return value;
+
+  if (
+    Number.isFinite(value) &&
+    value >= min &&
+    value <= max
+  ) {
+    return value;
+  }
+
   return fallback;
 }
 
+
 function readBooleanEnv(key, fallback = false) {
-  const raw = String(process.env[key] ?? "").trim().toLowerCase();
+  const raw = String(
+    process.env[key] ?? ""
+  )
+    .trim()
+    .toLowerCase();
+
   if (!raw) return fallback;
-  return ["1", "true", "yes", "on"].includes(raw);
+
+  return [
+    "1",
+    "true",
+    "yes",
+    "on"
+  ].includes(raw);
 }
 
+
 function getDiaryDateString(date = new Date()) {
-  const parts = getDatePartsInTimeZone(date, TIME_ZONE);
+  const parts =
+    getDatePartsInTimeZone(date, TIME_ZONE);
+
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
+
 function getDiaryTimeString(date = new Date()) {
-  const parts = getDatePartsInTimeZone(date, TIME_ZONE);
+  const parts =
+    getDatePartsInTimeZone(date, TIME_ZONE);
+
   return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
 }
+
 
 // 批注 2026-07-11：日记只接受模型显式输出的 [DIARY] 块，避免把普通推送内容误写进本地日记。
 function extractDiaryFromResponse(text) {
   const diaryBlocks = [];
-  const remainingText = String(text || "").replace(/\[DIARY\]([\s\S]*?)\[\/DIARY\]/gi, (_, content) => {
-    const diary = String(content || "").trim();
-    if (diary) diaryBlocks.push(diary);
-    return "";
-  }).trim();
+
+  const remainingText = String(text || "")
+    .replace(
+      /\[DIARY\]([\s\S]*?)\[\/DIARY\]/gi,
+      (_, content) => {
+        const diary =
+          String(content || "").trim();
+
+        if (diary) {
+          diaryBlocks.push(diary);
+        }
+
+        return "";
+      }
+    )
+    .trim();
 
   return {
-    diaryContent: diaryBlocks.join("\n\n").trim(),
+    diaryContent: diaryBlocks
+      .join("\n\n")
+      .trim(),
+
     remainingText
   };
 }
 
+
 function appendDiaryEntry(content) {
-  if (!readBooleanEnv("DIARY_ENABLED", true)) {
-    console.log("模型写了日记，但 DIARY_ENABLED=false，本次不保存");
+  if (
+    !readBooleanEnv(
+      "DIARY_ENABLED",
+      true
+    )
+  ) {
+    console.log(
+      "模型写了日记，但 DIARY_ENABLED=false，本次不保存"
+    );
+
     return false;
   }
 
-  const cleanContent = String(content || "").trim();
+  const cleanContent =
+    String(content || "").trim();
+
   if (!cleanContent) return false;
 
-  fs.mkdirSync(DIARY_DIR_PATH, { recursive: true });
-  const diaryFile = path.join(DIARY_DIR_PATH, `${getDiaryDateString()}.md`);
-  const entry = `\n\n## ${getDiaryTimeString()}\n\n${cleanContent}\n`;
-  fs.appendFileSync(diaryFile, entry, "utf-8");
+  fs.mkdirSync(
+    DIARY_DIR_PATH,
+    { recursive: true }
+  );
 
-  console.log(`已保存日记：${diaryFile}`);
+  const diaryFile = path.join(
+    DIARY_DIR_PATH,
+    `${getDiaryDateString()}.md`
+  );
+
+  const entry =
+    `\n\n## ${getDiaryTimeString()}\n\n${cleanContent}\n`;
+
+  fs.appendFileSync(
+    diaryFile,
+    entry,
+    "utf-8"
+  );
+
+  console.log(
+    `已保存日记：${diaryFile}`
+  );
+
   return true;
 }
 
+
 // 批注 2026-07-11：推送层扩展为 Bark/ntfy；默认仍走 Bark，保护旧部署不改 .env 也能继续运行。
-async function sendPushNotification({ title, body }) {
-  const provider = (process.env.PUSH_PROVIDER || "bark").trim().toLowerCase();
+async function sendPushNotification({
+  title,
+  body
+}) {
+  const provider = (
+    process.env.PUSH_PROVIDER ||
+    "bark"
+  )
+    .trim()
+    .toLowerCase();
 
   if (provider === "ntfy") {
-    const topic = String(process.env.NTFY_TOPIC || "").trim();
+    const topic =
+      String(
+        process.env.NTFY_TOPIC || ""
+      ).trim();
 
     if (!topic) {
       return {
@@ -114,14 +238,18 @@ async function sendPushNotification({ title, body }) {
       };
     }
 
-    const server = (process.env.NTFY_SERVER_URL || "https://ntfy.sh").replace(/\/+$/, "");
+    const server = (
+      process.env.NTFY_SERVER_URL ||
+      "https://ntfy.sh"
+    ).replace(/\/+$/, "");
 
     const headers = {
       "Content-Type": "application/json"
     };
 
     if (process.env.NTFY_TOKEN) {
-      headers.Authorization = `Bearer ${process.env.NTFY_TOKEN}`;
+      headers.Authorization =
+        `Bearer ${process.env.NTFY_TOKEN}`;
     }
 
     const payload = buildNtfyPayload({
@@ -132,14 +260,21 @@ async function sendPushNotification({ title, body }) {
       tags: process.env.NTFY_TAGS
     });
 
-    const response = await fetch(server, {
-      method: "POST",
-      signal: AbortSignal.timeout(PUSH_TIMEOUT_MS),
-      headers,
-      body: JSON.stringify(payload)
-    });
+    const response = await fetch(
+      server,
+      {
+        method: "POST",
+        signal:
+          AbortSignal.timeout(
+            PUSH_TIMEOUT_MS
+          ),
+        headers,
+        body: JSON.stringify(payload)
+      }
+    );
 
-    const responseText = await response.text();
+    const responseText =
+      await response.text();
 
     console.log(
       `ntfy HTTP: ${response.status} ${response.statusText || ""}`,
@@ -150,7 +285,9 @@ async function sendPushNotification({ title, body }) {
       return {
         ok: false,
         providerLabel: "ntfy",
-        reason: responseText || `HTTP ${response.status}`
+        reason:
+          responseText ||
+          `HTTP ${response.status}`
       };
     }
 
@@ -163,8 +300,10 @@ async function sendPushNotification({ title, body }) {
   if (provider !== "bark") {
     return {
       ok: false,
-      providerLabel: provider || "未知渠道",
-      reason: `不支持的 PUSH_PROVIDER：${provider}`
+      providerLabel:
+        provider || "未知渠道",
+      reason:
+        `不支持的 PUSH_PROVIDER：${provider}`
     };
   }
 
@@ -179,31 +318,56 @@ async function sendPushNotification({ title, body }) {
   const barkPayload = {
     title,
     body,
-    device_key: process.env.BARK_KEY,
-    icon: process.env.CUSTOM_ICON_URL
+    device_key:
+      process.env.BARK_KEY,
+    icon:
+      process.env.CUSTOM_ICON_URL
   };
 
-  const response = await fetch("https://api.day.app/push", {
-    method: "POST",
-    signal: AbortSignal.timeout(PUSH_TIMEOUT_MS),
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(barkPayload)
-  });
+  const response = await fetch(
+    "https://api.day.app/push",
+    {
+      method: "POST",
+      signal:
+        AbortSignal.timeout(
+          PUSH_TIMEOUT_MS
+        ),
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(
+        barkPayload
+      )
+    }
+  );
 
-  const responseText = await response.text();
+  const responseText =
+    await response.text();
+
   let result = {};
 
   try {
-    result = JSON.parse(responseText);
+    result = JSON.parse(
+      responseText
+    );
   } catch {}
 
-  console.log("\nBark Result:\n", result || responseText);
+  console.log(
+    "\nBark Result:\n",
+    result || responseText
+  );
 
-  if (!response.ok || (result.code && result.code !== 200)) {
+  if (
+    !response.ok ||
+    (result.code &&
+      result.code !== 200)
+  ) {
     return {
       ok: false,
       providerLabel: "Bark",
-      reason: result.message || `HTTP ${response.status}`
+      reason:
+        result.message ||
+        `HTTP ${response.status}`
     };
   }
 
@@ -213,46 +377,140 @@ async function sendPushNotification({ title, body }) {
   };
 }
 
+
 function isDayTime(date = new Date()) {
-  const hour = getHourInTimeZone(date, TIME_ZONE);
-  const start = readNumberEnv("WAKE_DAY_START_HOUR", 10, { min: 0, max: 23 });
-  const end = readNumberEnv("WAKE_DAY_END_HOUR", 24, { min: 1, max: 24 });
+  const hour =
+    getHourInTimeZone(
+      date,
+      TIME_ZONE
+    );
 
-  if (start === end) return true;
-  if (start < end) return hour >= start && hour < end;
-  return hour >= start || hour < end;
+  const start =
+    readNumberEnv(
+      "WAKE_DAY_START_HOUR",
+      10,
+      {
+        min: 0,
+        max: 23
+      }
+    );
+
+  const end =
+    readNumberEnv(
+      "WAKE_DAY_END_HOUR",
+      24,
+      {
+        min: 1,
+        max: 24
+      }
+    );
+
+  if (start === end) {
+    return true;
+  }
+
+  if (start < end) {
+    return (
+      hour >= start &&
+      hour < end
+    );
+  }
+
+  return (
+    hour >= start ||
+    hour < end
+  );
 }
 
-function getWakeAfterMinutes(date = new Date()) {
+
+function getWakeAfterMinutes(
+  date = new Date()
+) {
   return isDayTime(date)
-    ? readNumberEnv("DAY_WAKE_AFTER_MINUTES", 60, { min: 1 })
-    : readNumberEnv("NIGHT_WAKE_AFTER_MINUTES", 120, { min: 1 });
+    ? readNumberEnv(
+        "DAY_WAKE_AFTER_MINUTES",
+        60,
+        { min: 1 }
+      )
+    : readNumberEnv(
+        "NIGHT_WAKE_AFTER_MINUTES",
+        120,
+        { min: 1 }
+      );
 }
 
-function getCheckIntervalMinutes(date = new Date()) {
+
+function getCheckIntervalMinutes(
+  date = new Date()
+) {
   return isDayTime(date)
-    ? readNumberEnv("DAY_CHECK_INTERVAL_MINUTES", 10, { min: 1 })
-    : readNumberEnv("NIGHT_CHECK_INTERVAL_MINUTES", 120, { min: 1 });
+    ? readNumberEnv(
+        "DAY_CHECK_INTERVAL_MINUTES",
+        10,
+        { min: 1 }
+      )
+    : readNumberEnv(
+        "NIGHT_CHECK_INTERVAL_MINUTES",
+        120,
+        { min: 1 }
+      );
 }
+
 
 function normalizeContentToText(content) {
-  if (typeof content === "string") return content;
-  if (content == null) return "";
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (content == null) {
+    return "";
+  }
 
   if (Array.isArray(content)) {
     return content
       .map(part => {
-        if (typeof part === "string") return part;
-        if (!part || typeof part !== "object") return "";
-
-        const type = typeof part.type === "string" ? part.type.toLowerCase() : "";
-
-        if (type === "text" || type === "input_text") {
-          return part.text || part.content || "";
+        if (
+          typeof part === "string"
+        ) {
+          return part;
         }
 
-        if (part.image_url || type.includes("image")) return "[图片]";
-        if (part.file || type.includes("file")) return "[文件]";
+        if (
+          !part ||
+          typeof part !== "object"
+        ) {
+          return "";
+        }
+
+        const type =
+          typeof part.type === "string"
+            ? part.type.toLowerCase()
+            : "";
+
+        if (
+          type === "text" ||
+          type === "input_text"
+        ) {
+          return (
+            part.text ||
+            part.content ||
+            ""
+          );
+        }
+
+        if (
+          part.image_url ||
+          type.includes("image")
+        ) {
+          return "[图片]";
+        }
+
+        if (
+          part.file ||
+          type.includes("file")
+        ) {
+          return "[文件]";
+        }
 
         return "";
       })
@@ -260,24 +518,53 @@ function normalizeContentToText(content) {
       .join("\n");
   }
 
-  if (content && typeof content === "object") {
-    const type = typeof content.type === "string" ? content.type.toLowerCase() : "";
+  if (
+    content &&
+    typeof content === "object"
+  ) {
+    const type =
+      typeof content.type === "string"
+        ? content.type.toLowerCase()
+        : "";
 
-    if (content.image_url || type.includes("image")) return "[图片]";
-    if (content.file || type.includes("file")) return "[文件]";
+    if (
+      content.image_url ||
+      type.includes("image")
+    ) {
+      return "[图片]";
+    }
+
+    if (
+      content.file ||
+      type.includes("file")
+    ) {
+      return "[文件]";
+    }
   }
 
   return "[非文本内容]";
 }
 
-function summarizeWakeMessages(messages = []) {
-  const list = Array.isArray(messages) ? messages : [];
+
+function summarizeWakeMessages(
+  messages = []
+) {
+  const list =
+    Array.isArray(messages)
+      ? messages
+      : [];
+
   const roles = {};
   let chars = 0;
 
   for (const msg of list) {
-    roles[msg?.role || ""] = (roles[msg?.role || ""] || 0) + 1;
-    chars += normalizeContentToText(msg?.content).length;
+    roles[msg?.role || ""] =
+      (roles[msg?.role || ""] || 0) +
+      1;
+
+    chars += normalizeContentToText(
+      msg?.content
+    ).length;
   }
 
   return {
@@ -286,6 +573,7 @@ function summarizeWakeMessages(messages = []) {
     text_chars: chars
   };
 }
+
 
 function weatherCodeText(code) {
   const table = {
@@ -312,53 +600,137 @@ function weatherCodeText(code) {
     99: "雷暴伴大冰雹"
   };
 
-  return table[code] || `天气代码 ${code}`;
+  return (
+    table[code] ||
+    `天气代码 ${code}`
+  );
 }
 
+
 async function fetchWeatherContext() {
-  if (!readBooleanEnv("WEATHER_ENABLED", false)) return "";
-
-  const lat = Number(process.env.WEATHER_LAT);
-  const lon = Number(process.env.WEATHER_LON);
-
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-    console.log("已启用 WEATHER_ENABLED，但 WEATHER_LAT / WEATHER_LON 未正确配置，跳过天气注入");
+  if (
+    !readBooleanEnv(
+      "WEATHER_ENABLED",
+      false
+    )
+  ) {
     return "";
   }
 
-  const location = process.env.WEATHER_LOCATION_NAME || "当前位置";
-  const units = (process.env.WEATHER_UNITS || "metric").trim().toLowerCase();
-  const temperatureUnit = units === "fahrenheit" ? "fahrenheit" : "celsius";
-  const windSpeedUnit = units === "fahrenheit" ? "mph" : "kmh";
+  const lat =
+    Number(process.env.WEATHER_LAT);
 
-  const url = new URL("https://api.open-meteo.com/v1/forecast");
+  const lon =
+    Number(process.env.WEATHER_LON);
 
-  url.searchParams.set("latitude", String(lat));
-  url.searchParams.set("longitude", String(lon));
+  if (
+    !Number.isFinite(lat) ||
+    !Number.isFinite(lon)
+  ) {
+    console.log(
+      "已启用 WEATHER_ENABLED，但 WEATHER_LAT / WEATHER_LON 未正确配置，跳过天气注入"
+    );
+
+    return "";
+  }
+
+  const location =
+    process.env.WEATHER_LOCATION_NAME ||
+    "当前位置";
+
+  const units = (
+    process.env.WEATHER_UNITS ||
+    "metric"
+  )
+    .trim()
+    .toLowerCase();
+
+  const temperatureUnit =
+    units === "fahrenheit"
+      ? "fahrenheit"
+      : "celsius";
+
+  const windSpeedUnit =
+    units === "fahrenheit"
+      ? "mph"
+      : "kmh";
+
+  const url = new URL(
+    "https://api.open-meteo.com/v1/forecast"
+  );
+
+  url.searchParams.set(
+    "latitude",
+    String(lat)
+  );
+
+  url.searchParams.set(
+    "longitude",
+    String(lon)
+  );
+
   url.searchParams.set(
     "current",
     "temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weather_code,wind_speed_10m"
   );
-  url.searchParams.set("daily", "sunrise,sunset");
-  url.searchParams.set("timezone", "auto");
-  url.searchParams.set("forecast_days", "1");
-  url.searchParams.set("temperature_unit", temperatureUnit);
-  url.searchParams.set("wind_speed_unit", windSpeedUnit);
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), WEATHER_TIMEOUT_MS);
+  url.searchParams.set(
+    "daily",
+    "sunrise,sunset"
+  );
+
+  url.searchParams.set(
+    "timezone",
+    "auto"
+  );
+
+  url.searchParams.set(
+    "forecast_days",
+    "1"
+  );
+
+  url.searchParams.set(
+    "temperature_unit",
+    temperatureUnit
+  );
+
+  url.searchParams.set(
+    "wind_speed_unit",
+    windSpeedUnit
+  );
+
+  const controller =
+    new AbortController();
+
+  const timeout = setTimeout(
+    () => controller.abort(),
+    WEATHER_TIMEOUT_MS
+  );
 
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    const response =
+      await fetch(url, {
+        signal:
+          controller.signal
+      });
 
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
+      throw new Error(
+        `HTTP ${response.status}`
+      );
     }
 
-    const data = await response.json();
-    const current = data.current || {};
-    const daily = data.daily || {};
-    const unitsInfo = data.current_units || {};
+    const data =
+      await response.json();
+
+    const current =
+      data.current || {};
+
+    const daily =
+      data.daily || {};
+
+    const unitsInfo =
+      data.current_units || {};
 
     const lines = [
       "## 天气信息",
@@ -369,66 +741,129 @@ async function fetchWeatherContext() {
       `- 风速：${current.wind_speed_10m}${unitsInfo.wind_speed_10m || ""}`
     ];
 
-    if (Array.isArray(daily.sunrise) && Array.isArray(daily.sunset)) {
-      lines.push(`- 日出/日落：${daily.sunrise[0]} / ${daily.sunset[0]}`);
+    if (
+      Array.isArray(
+        daily.sunrise
+      ) &&
+      Array.isArray(
+        daily.sunset
+      )
+    ) {
+      lines.push(
+        `- 日出/日落：${daily.sunrise[0]} / ${daily.sunset[0]}`
+      );
     }
 
     return lines.join("\n");
+
   } catch (err) {
-    console.log("天气注入失败，跳过本次天气信息:", err.message);
+    console.log(
+      "天气注入失败，跳过本次天气信息:",
+      err.message
+    );
+
     return "";
+
   } finally {
     clearTimeout(timeout);
   }
 }
 
+
 async function loadTimelineMessages() {
   try {
-    const { data, error } = await supabase
-      .from('timeline')
-      .select('role, content, created_at')
-      .order('created_at', { ascending: true });
+    const {
+      data,
+      error
+    } = await supabase
+      .from("timeline")
+      .select(
+        "role, content, created_at"
+      )
+      .order(
+        "created_at",
+        {
+          ascending: true
+        }
+      );
 
-    if (error) throw error;
+    if (error) {
+      throw error;
+    }
 
-    if (!data || data.length === 0) {
-      console.log('⚠️ timeline 表为空');
+    if (
+      !data ||
+      data.length === 0
+    ) {
+      console.log(
+        "⚠️ timeline 表为空"
+      );
+
       return null;
     }
 
-    console.log(`📚 从 Supabase 加载了 ${data.length} 条时间线记录`);
+    console.log(
+      `📚 从 Supabase 加载了 ${data.length} 条时间线记录`
+    );
+
     return data;
+
   } catch (e) {
-    console.log('⚠️ 读取 Supabase timeline 失败:', e.message);
+    console.log(
+      "⚠️ 读取 Supabase timeline 失败:",
+      e.message
+    );
+
     return null;
   }
 }
+
+
 // ========================
 // Heartbeat 最近推送日志
 // ========================
 
 const HEARTBEAT_PUSH_LOG_LIMIT = 10;
+
 const HEARTBEAT_PUSH_DUPLICATE_WINDOW_MINUTES = 360;
+
 
 async function loadRecentHeartbeatPushLogs(
   limit = HEARTBEAT_PUSH_LOG_LIMIT
 ) {
   try {
-    const { data, error } = await supabase
+    const {
+      data,
+      error
+    } = await supabase
       .from("heartbeat_push_logs")
-      .select("id, created_at, content, trigger_type")
-      .order("created_at", { ascending: false })
+      .select(
+        "id, created_at, content, trigger_type"
+      )
+      .order(
+        "created_at",
+        {
+          ascending: false
+        }
+      )
       .limit(limit);
 
-    if (error) throw error;
+    if (error) {
+      throw error;
+    }
 
-    const logs = Array.isArray(data) ? data : [];
+    const logs =
+      Array.isArray(data)
+        ? data
+        : [];
 
-    console.log(`📝 加载最近 ${logs.length} 条 Heartbeat 推送记录`);
+    console.log(
+      `📝 加载最近 ${logs.length} 条 Heartbeat 推送记录`
+    );
 
     return logs;
+
   } catch (err) {
-    // 表还没创建时不要让整个 Heartbeat 挂掉
     console.log(
       "⚠️ 读取 Heartbeat 推送日志失败:",
       err.message
@@ -438,46 +873,67 @@ async function loadRecentHeartbeatPushLogs(
   }
 }
 
-function formatRecentHeartbeatPushLogs(logs = []) {
+
+function formatRecentHeartbeatPushLogs(
+  logs = []
+) {
   if (!logs.length) {
     return "暂无最近主动推送记录。";
   }
 
   return logs
     .map(log => {
-      const time = log.created_at
-        ? formatDateTimeInTimeZone(
-            new Date(log.created_at),
-            TIME_ZONE
-          )
-        : "未知时间";
+      const time =
+        log.created_at
+          ? formatDateTimeInTimeZone(
+              new Date(
+                log.created_at
+              ),
+              TIME_ZONE
+            )
+          : "未知时间";
 
-      return `- ${time}：${String(log.content || "").trim()}`;
+      return `- ${time}：${String(
+        log.content || ""
+      ).trim()}`;
     })
     .join("\n");
 }
+
 
 async function saveHeartbeatPushLog(
   content,
   triggerType = "heartbeat"
 ) {
-  const cleanContent = String(content || "").trim();
+  const cleanContent =
+    String(content || "").trim();
 
-  if (!cleanContent) return false;
+  if (!cleanContent) {
+    return false;
+  }
 
   try {
-    const { error } = await supabase
-      .from("heartbeat_push_logs")
-      .insert({
-        content: cleanContent,
-        trigger_type: triggerType
-      });
+    const { error } =
+      await supabase
+        .from(
+          "heartbeat_push_logs"
+        )
+        .insert({
+          content: cleanContent,
+          trigger_type:
+            triggerType
+        });
 
-    if (error) throw error;
+    if (error) {
+      throw error;
+    }
 
-    console.log("📝 Heartbeat 推送日志已保存");
+    console.log(
+      "📝 Heartbeat 推送日志已保存"
+    );
 
     return true;
+
   } catch (err) {
     console.log(
       "⚠️ 写入 Heartbeat 推送日志失败:",
@@ -488,6 +944,7 @@ async function saveHeartbeatPushLog(
   }
 }
 
+
 // ========================
 // 轻量重复推送检查
 // ========================
@@ -496,88 +953,160 @@ function normalizePushText(text) {
   return String(text || "")
     .toLowerCase()
     .replace(
-      /[，。！？、,.!?：:；;（）()【】[\]「」『』“”"'‘’…—\-_\s]/g,
+      /[，。！？、,.!?：:；;（）()【】[\]「」『』“”"'‘’…—\-_ \s]/g,
       ""
     )
     .trim();
 }
 
-function calculatePushSimilarity(a, b) {
-  const x = normalizePushText(a);
-  const y = normalizePushText(b);
 
-  if (!x || !y) return 0;
+function calculatePushSimilarity(
+  a,
+  b
+) {
+  const x =
+    normalizePushText(a);
 
-  if (x === y) return 1;
+  const y =
+    normalizePushText(b);
 
-  // 很短的内容不做模糊判断，避免误杀
-  if (x.length < 6 || y.length < 6) {
+  if (!x || !y) {
     return 0;
   }
 
-  if (x.includes(y) || y.includes(x)) {
+  if (x === y) {
+    return 1;
+  }
+
+  // 很短的内容不做模糊判断，避免误杀
+  if (
+    x.length < 6 ||
+    y.length < 6
+  ) {
+    return 0;
+  }
+
+  if (
+    x.includes(y) ||
+    y.includes(x)
+  ) {
     return (
-      Math.min(x.length, y.length) /
-      Math.max(x.length, y.length)
+      Math.min(
+        x.length,
+        y.length
+      ) /
+      Math.max(
+        x.length,
+        y.length
+      )
     );
   }
 
-  const makeBigrams = text => {
-    const result = new Set();
+  const makeBigrams =
+    text => {
+      const result =
+        new Set();
 
-    for (let i = 0; i < text.length - 1; i++) {
-      result.add(text.slice(i, i + 2));
-    }
+      for (
+        let i = 0;
+        i < text.length - 1;
+        i++
+      ) {
+        result.add(
+          text.slice(i, i + 2)
+        );
+      }
 
-    return result;
-  };
+      return result;
+    };
 
-  const setA = makeBigrams(x);
-  const setB = makeBigrams(y);
+  const setA =
+    makeBigrams(x);
 
-  if (!setA.size || !setB.size) return 0;
+  const setB =
+    makeBigrams(y);
+
+  if (
+    !setA.size ||
+    !setB.size
+  ) {
+    return 0;
+  }
 
   let intersection = 0;
 
-  for (const item of setA) {
+  for (
+    const item of setA
+  ) {
     if (setB.has(item)) {
       intersection++;
     }
   }
 
-  const union = new Set([...setA, ...setB]).size;
+  const union =
+    new Set([
+      ...setA,
+      ...setB
+    ]).size;
 
-  return union ? intersection / union : 0;
+  return union
+    ? intersection / union
+    : 0;
 }
 
-function isRecentDuplicatePush(title, body, logs = []) {
-  const candidate = `${title} ${body}`;
+
+function isRecentDuplicatePush(
+  title,
+  body,
+  logs = []
+) {
+  const candidate =
+    `${title} ${body}`;
 
   const now = Date.now();
 
-  const windowMinutes = readNumberEnv(
-    "HEARTBEAT_PUSH_DUPLICATE_WINDOW_MINUTES",
-    HEARTBEAT_PUSH_DUPLICATE_WINDOW_MINUTES,
-    { min: 1 }
-  );
+  const windowMinutes =
+    readNumberEnv(
+      "HEARTBEAT_PUSH_DUPLICATE_WINDOW_MINUTES",
+      HEARTBEAT_PUSH_DUPLICATE_WINDOW_MINUTES,
+      { min: 1 }
+    );
 
-  const windowMs = windowMinutes * 60 * 1000;
+  const windowMs =
+    windowMinutes * 60 * 1000;
 
-  for (const log of logs) {
-    const createdAt = Date.parse(log.created_at);
+  for (
+    const log of logs
+  ) {
+    const createdAt =
+      Date.parse(
+        log.created_at
+      );
 
-    if (!Number.isFinite(createdAt)) continue;
-
-    if (now - createdAt > windowMs) {
+    if (
+      !Number.isFinite(
+        createdAt
+      )
+    ) {
       continue;
     }
 
-    const similarity = calculatePushSimilarity(
-      candidate,
-      log.content
-    );
+    if (
+      now - createdAt >
+      windowMs
+    ) {
+      continue;
+    }
 
-    if (similarity >= 0.82) {
+    const similarity =
+      calculatePushSimilarity(
+        candidate,
+        log.content
+      );
+
+    if (
+      similarity >= 0.82
+    ) {
       console.log(
         `⚠️ 检测到近期重复推送，相似度 ${(similarity * 100).toFixed(1)}%`
       );
@@ -588,35 +1117,73 @@ function isRecentDuplicatePush(title, body, logs = []) {
 
   return false;
 }
+
+
 function getNow() {
   return new Date();
 }
 
+
 function getChinaTimeString() {
-  return formatDateTimeInTimeZone(new Date(), TIME_ZONE);
+  return formatDateTimeInTimeZone(
+    new Date(),
+    TIME_ZONE
+  );
 }
 
+
 function getLocalTimeString() {
-  return formatDateTimeInTimeZone(new Date(), TIME_ZONE);
+  return formatDateTimeInTimeZone(
+    new Date(),
+    TIME_ZONE
+  );
 }
+
 
 function shouldWake(lastUserTime) {
   const now = getNow();
-  const diffMinutes = Math.floor((now - new Date(lastUserTime)) / 1000 / 60);
 
-  return diffMinutes >= getWakeAfterMinutes(now);
+  const diffMinutes =
+    Math.floor(
+      (now -
+        new Date(
+          lastUserTime
+        )) /
+        1000 /
+        60
+    );
+
+  return (
+    diffMinutes >=
+    getWakeAfterMinutes(now)
+  );
 }
 
-function parseTimelineTimestamp(value) {
-  const text = String(value || "");
 
-  const match = text.match(
-    /（?\s*(\d{4})([-/])(\d{1,2})\2(\d{1,2})(?:[ T]?)(\d{1,2})[:：](\d{2})/
-  );
+function parseTimelineTimestamp(
+  value
+) {
+  const text =
+    String(value || "");
 
-  if (!match) return null;
+  const match =
+    text.match(
+      /（?\s*(\d{4})([-/])(\d{1,2})\2(\d{1,2})[ T]*(\d{1,2})[:：](\d{2})/
+    );
 
-  const [, yyyy, , month, day, hour, minute] = match;
+  if (!match) {
+    return null;
+  }
+
+  const [
+    ,
+    yyyy,
+    ,
+    month,
+    day,
+    hour,
+    minute
+  ] = match;
 
   return zonedWallTimeToDate(
     {
@@ -630,50 +1197,119 @@ function parseTimelineTimestamp(value) {
   );
 }
 
-function getLastUserTime(messages) {
-  const reversed = [...messages].reverse();
 
-  for (const msg of reversed) {
-    if (msg.role === "user") {
-      const content = normalizeContentToText(msg.content);
+function getLastUserTime(
+  messages
+) {
+  const reversed =
+    [...messages].reverse();
+
+  for (
+    const msg of reversed
+  ) {
+    if (
+      msg.role === "user"
+    ) {
+      const content =
+        normalizeContentToText(
+          msg.content
+        );
 
       // 批注 2026-07-15：兼容 Kelivo 时间前缀 "YYYY-MM-DDHH:mm"；
       // 旧的 "YYYY-MM-DD HH:mm" 仍然可用，避免无空格时间导致 wake-up 误判没有用户时间。
-      const parsed = parseTimelineTimestamp(content);
 
-      if (parsed) return parsed;
+      const parsed =
+        parseTimelineTimestamp(
+          content
+        );
+
+      if (parsed) {
+        return parsed;
+      }
     }
   }
 
   return null;
 }
 
-function stripPosition(messages) {
-  return messages.map(({ position, ...rest }) => rest);
+
+function stripPosition(
+  messages
+) {
+  return messages.map(
+    ({
+      position,
+      ...rest
+    }) => rest
+  );
 }
 
-function buildWakePrompt(currentTime, diffMinutes, weatherContext = "") {
-  // 优先读取独立的提示词文件（推荐方式）
-  const promptFile = path.join(__dirname, "wake_prompt.txt");
 
-  if (fs.existsSync(promptFile)) {
-    const template = fs.readFileSync(promptFile, "utf-8");
+function buildWakePrompt(
+  currentTime,
+  diffMinutes,
+  weatherContext = ""
+) {
+  // 优先读取独立的提示词文件（推荐方式）
+  const promptFile =
+    path.join(
+      __dirname,
+      "wake_prompt.txt"
+    );
+
+  if (
+    fs.existsSync(promptFile)
+  ) {
+    const template =
+      fs.readFileSync(
+        promptFile,
+        "utf-8"
+      );
 
     return template
-      .replace(/\$\{currentTime\}/g, currentTime)
-      .replace(/\$\{diffMinutes\}/g, diffMinutes)
-      .replace(/\$\{weatherContext\}/g, weatherContext)
-      .replace(/\$\{weather\}/g, weatherContext);
+      .replace(
+        /\$\{currentTime\}/g,
+        currentTime
+      )
+      .replace(
+        /\$\{diffMinutes\}/g,
+        diffMinutes
+      )
+      .replace(
+        /\$\{weatherContext\}/g,
+        weatherContext
+      )
+      .replace(
+        /\$\{weather\}/g,
+        weatherContext
+      );
   }
 
   // 如果文件不存在，尝试从环境变量读取（兼容旧配置）
-  if (process.env.WAKE_PROMPT_TEMPLATE) {
+  if (
+    process.env.WAKE_PROMPT_TEMPLATE
+  ) {
     return process.env.WAKE_PROMPT_TEMPLATE
-      .replace(/\\n/g, '\n')
-      .replace(/\$\{currentTime\}/g, currentTime)
-      .replace(/\$\{diffMinutes\}/g, diffMinutes)
-      .replace(/\$\{weatherContext\}/g, weatherContext)
-      .replace(/\$\{weather\}/g, weatherContext);
+      .replace(
+        /\\\n/g,
+        "\n"
+      )
+      .replace(
+        /\$\{currentTime\}/g,
+        currentTime
+      )
+      .replace(
+        /\$\{diffMinutes\}/g,
+        diffMinutes
+      )
+      .replace(
+        /\$\{weatherContext\}/g,
+        weatherContext
+      )
+      .replace(
+        /\$\{weather\}/g,
+        weatherContext
+      );
   }
 
   // 默认理智版本（开源通用），可自行修改提示词
@@ -695,121 +1331,196 @@ ${weatherContext ? `\n${weatherContext}\n` : ""}
 `;
 }
 
+
 async function runWakeUp() {
-  console.log("\n==========================");
-  console.log("开始自动唤醒");
-  console.log("==========================\n");
+  console.log(
+    "\n=========================="
+  );
 
-  const messages = await loadTimelineMessages();
+  console.log(
+    "开始自动唤醒"
+  );
 
-  if (!messages) return;
+  console.log(
+    "==========================\n"
+  );
 
-  const lastUserTime = getLastUserTime(messages);
+  const messages =
+    await loadTimelineMessages();
+
+  if (!messages) {
+    return;
+  }
+
+  const lastUserTime =
+    getLastUserTime(
+      messages
+    );
 
   if (!lastUserTime) {
-    console.log("未找到用户时间");
+    console.log(
+      "未找到用户时间"
+    );
+
     return;
   }
 
   const now = new Date();
-  const diffMinutes = Math.floor((now - lastUserTime) / 1000 / 60);
 
-  if (!shouldWake(lastUserTime)) {
-    console.log("\n暂不需要唤醒\n");
+  const diffMinutes =
+    Math.floor(
+      (now -
+        lastUserTime) /
+        1000 /
+        60
+    );
+
+  if (
+    !shouldWake(
+      lastUserTime
+    )
+  ) {
+    console.log(
+      "\n暂不需要唤醒\n"
+    );
+
     return;
   }
 
- const recentPushLogs =
-  await loadRecentHeartbeatPushLogs();
+  // ========================
+  // 加载最近 Heartbeat 推送日志
+  // ========================
 
-const recentPushContext =
-  formatRecentHeartbeatPushLogs(recentPushLogs);
+  const recentPushLogs =
+    await loadRecentHeartbeatPushLogs();
 
-const weatherContext =
-  await fetchWeatherContext();
+  const recentPushContext =
+    formatRecentHeartbeatPushLogs(
+      recentPushLogs
+    );
 
-const wakePrompt = buildWakePrompt(
-  getChinaTimeString(),
-  diffMinutes,
-  weatherContext
-);
+  const weatherContext =
+    await fetchWeatherContext();
 
-  const cleanMessages = stripPosition(messages);
+  const wakePrompt =
+    buildWakePrompt(
+      getChinaTimeString(),
+      diffMinutes,
+      weatherContext
+    );
+
+  const cleanMessages =
+    stripPosition(
+      messages
+    );
 
   // 只给后台唤醒模型提供最近一小段历史。
   // 数据库仍然保留完整 timeline，不影响长期记录。
-  const historyCandidates = cleanMessages
-    .filter(msg => msg.role !== "system")
-    .filter(msg => {
-      const c = normalizeContentToText(msg.content);
+  const historyCandidates =
+    cleanMessages
+      .filter(
+        msg =>
+          msg.role !== "system"
+      )
+      .filter(msg => {
+        const c =
+          normalizeContentToText(
+            msg.content
+          );
 
-      return (
-        !c.includes("<memories>") &&
-        !c.includes("记忆库使用策略")
-      );
-    })
-    .slice(-30);
+        return (
+          !c.includes(
+            "<memories>"
+          ) &&
+          !c.includes(
+            "记忆库使用策略"
+          )
+        );
+      })
+      .slice(-30);
 
-  const userDisplay = process.env.USER_DISPLAY_NAME || "用户";
-  const aiDisplay = process.env.AI_DISPLAY_NAME || "AI";
+  const userDisplay =
+    process.env.USER_DISPLAY_NAME ||
+    "用户";
+
+  const aiDisplay =
+    process.env.AI_DISPLAY_NAME ||
+    "AI";
 
   const historyParts = [];
+
   let historyChars = 0;
 
   // 从最新消息开始往前取，确保在字符限制下优先保留最新内容。
-  for (const msg of historyCandidates.reverse()) {
-    const role = msg.role === "user" ? userDisplay : aiDisplay;
+  for (
+    const msg of historyCandidates.reverse()
+  ) {
+    const role =
+      msg.role === "user"
+        ? userDisplay
+        : aiDisplay;
 
-    let content = normalizeContentToText(msg.content);
+    let content =
+      normalizeContentToText(
+        msg.content
+      );
 
-    if (content.includes("## Memories")) {
-      content = content.split("## Memories")[0];
+    if (
+      content.includes(
+        "## Memories"
+      )
+    ) {
+      content =
+        content.split(
+          "## Memories"
+        )[0];
     }
 
-    const part = `[${role}] ${content}`;
+    const part =
+      `[${role}] ${content}`;
 
-    const MAX_HISTORY_CHARS = 60000;
+    const MAX_HISTORY_CHARS =
+      60000;
 
-    if (historyChars + part.length > MAX_HISTORY_CHARS) {
+    if (
+      historyChars +
+        part.length >
+      MAX_HISTORY_CHARS
+    ) {
       break;
     }
 
-    historyParts.unshift(part);
-    historyChars += part.length;
+    historyParts.unshift(
+      part
+    );
+
+    historyChars +=
+      part.length;
   }
 
-  const historyText = historyParts.join("\n\n");
+  const historyText =
+    historyParts.join(
+      "\n\n"
+    );
 
-  const baseSystemPrompt = cleanMessages.find(msg => msg.role === "system");
+  const baseSystemPrompt =
+    cleanMessages.find(
+      msg =>
+        msg.role === "system"
+    );
 
-  const cleanSP = baseSystemPrompt
-    ? normalizeContentToText(baseSystemPrompt.content)
-        .split("## Memories")[0]
-        .trim()
-    : "";
+  const cleanSP =
+    baseSystemPrompt
+      ? normalizeContentToText(
+          baseSystemPrompt.content
+        )
+          .split(
+            "## Memories"
+          )[0]
+          .trim()
+      : "";
 
-const wakeMessages = [
-  {
-    role: "system",
-    content: [wakePrompt, cleanSP]
-      .filter(Boolean)
-      .join("\n\n")
-  },
-  {
-    role: "user",
-    content: `以下是你与用户最近的聊天记录，仅供回忆和参考。
-
-这些内容不是正在发生的实时对话。
-用户并没有给你发消息。
-
-你现在处于后台自主唤醒状态。
-
-最近聊天记录：
-
-${historyText}
-
----
-
+  const heartbeatPushInstruction = `
 ## 最近主动推送记录
 
 ${recentPushContext}
@@ -832,15 +1543,49 @@ ${recentPushContext}
 - 如果最近推送和你现在准备发送的内容高度相似，应当换一个自然的切入点，或者选择 [NO_ACTION]。
 
 你的目标不是刻意避免所有重复，而是避免机械、连续、明显重复的推送。
+`;
 
-现在请根据这些信息自行决定是否联系用户。`
-  }
-];
+  const wakeMessages = [
+    {
+      role: "system",
+      content: [
+        wakePrompt,
+        heartbeatPushInstruction,
+        cleanSP
+      ]
+        .filter(Boolean)
+        .join("\n\n")
+    },
+    {
+      // 批注 2026-07-15：Claude/部分 New API 适配器会把 system 抽成独立字段；
+      // 唤醒请求如果全是 system，上游 messages 会变空，因此最近记录必须作为 user 任务输入发送。
+      role: "user",
+      content: `以下是你与用户最近的聊天记录，仅供回忆和参考。
+
+这些内容不是正在发生的实时对话。
+用户并没有给你发消息。
+
+你现在处于后台自主唤醒状态。
+
+最近记录：
+
+${historyText}`
+    }
+  ];
 
   // 批注 2026-07-15：wake-up prompt 会包含最近聊天记录；
   // 默认日志只写摘要，避免公开部署时把完整上下文刷进 pm2 日志。
-  console.log("\n===== WAKE MESSAGES SUMMARY =====\n");
-  console.log(JSON.stringify(summarizeWakeMessages(wakeMessages)));
+  console.log(
+    "\n===== WAKE MESSAGES SUMMARY =====\n"
+  );
+
+  console.log(
+    JSON.stringify(
+      summarizeWakeMessages(
+        wakeMessages
+      )
+    )
+  );
 
   if (
     !process.env.TARGET_API_URL ||
@@ -850,43 +1595,68 @@ ${recentPushContext}
     console.log(
       "缺少 TARGET_API_URL / TARGET_API_KEY / MODEL_NAME，跳过本次唤醒"
     );
+
     return;
   }
 
-  const response = await fetch(process.env.TARGET_API_URL, {
-    method: "POST",
+  const response =
+    await fetch(
+      process.env.TARGET_API_URL,
+      {
+        method: "POST",
 
-    // 批注 2026-08-10：上游只建连不结束时，旧循环永远不会安排下一次检查；
-    // 五分钟默认总超时只作兜底，可由 WAKE_UPSTREAM_TIMEOUT_MS 调整。
-    signal: AbortSignal.timeout(WAKE_UPSTREAM_TIMEOUT_MS),
+        // 批注 2026-08-10：上游只建连不结束时，旧循环永远不会安排下一次检查；
+        // 五分钟默认总超时只作兜底，可由 WAKE_UPSTREAM_TIMEOUT_MS 调整。
+        signal:
+          AbortSignal.timeout(
+            WAKE_UPSTREAM_TIMEOUT_MS
+          ),
 
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.TARGET_API_KEY}`
-    },
+        headers: {
+          "Content-Type":
+            "application/json",
 
-    body: JSON.stringify({
-      model: process.env.MODEL_NAME,
-      messages: wakeMessages,
-      temperature: 0.8,
-      top_p: 0.95,
-      stream: false
-    })
-  });
+          Authorization:
+            `Bearer ${process.env.TARGET_API_KEY}`
+        },
 
-  const responseText = await response.text();
+        body: JSON.stringify({
+          model:
+            process.env.MODEL_NAME,
+
+          messages:
+            wakeMessages,
+
+          temperature: 0.8,
+
+          top_p: 0.95,
+
+          stream: false
+        })
+      }
+    );
+
+  const responseText =
+    await response.text();
 
   let data;
 
   try {
-    data = parseChatCompletionResponse(
-      responseText,
-      response.headers.get("content-type") || ""
-    );
+    data =
+      parseChatCompletionResponse(
+        responseText,
+        response.headers.get(
+          "content-type"
+        ) || ""
+      );
   } catch (error) {
     throw new Error(
       `模型响应无法解析（HTTP ${response.status}）：${
-        error.message || responseText.slice(0, 300)
+        error.message ||
+        responseText.slice(
+          0,
+          300
+        )
       }`
     );
   }
@@ -897,182 +1667,304 @@ ${recentPushContext}
     );
   }
 
-  const rawAiText = normalizeContentToText(
-    data.choices?.[0]?.message?.content
-  ).trim();
+  const rawAiText =
+    normalizeContentToText(
+      data.choices?.[0]?.message?.content
+    ).trim();
 
-  console.log("\nWake Result Summary:\n");
+  console.log(
+    "\nWake Result Summary:\n"
+  );
+
   console.log(
     JSON.stringify({
-      choices: Array.isArray(data.choices)
-        ? data.choices.length
-        : 0,
-      ai_text_chars: rawAiText.length
+      choices:
+        Array.isArray(
+          data.choices
+        )
+          ? data.choices.length
+          : 0,
+
+      ai_text_chars:
+        rawAiText.length
     })
   );
 
-  const diaryResult = extractDiaryFromResponse(rawAiText);
-  const diarySaved = appendDiaryEntry(diaryResult.diaryContent);
-  const aiText = diaryResult.remainingText;
+  const diaryResult =
+    extractDiaryFromResponse(
+      rawAiText
+    );
+
+  const diarySaved =
+    appendDiaryEntry(
+      diaryResult.diaryContent
+    );
+
+  const aiText =
+    diaryResult.remainingText;
 
   let eventContent;
 
   if (!aiText) {
-    console.log("\nAI 未返回推送内容，本次不发送推送\n");
-
-    eventContent = diarySaved
-      ? `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：只写日记）`
-      : `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：模型空回复）`;
-
-  // 判断 AI 是否明确要静默
-  } else if (aiText.match(/^\[NO_ACTION\]\s*(.{0,20})?/)) {
-    const noActionMatch = aiText.match(
-      /^\[NO_ACTION\]\s*(.{0,20})?/
+    console.log(
+      "\nAI 未返回推送内容，本次不发送推送\n"
     );
 
+    eventContent =
+      diarySaved
+        ? `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：只写日记）`
+        : `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：模型空回复）`;
+
+  // 判断 AI 是否明确要静默
+  } else if (
+    /^\[NO_ACTION\]\s*(.{0,20})?/i.test(
+      aiText
+    )
+  ) {
+    const noActionMatch =
+      aiText.match(
+        /^\[NO_ACTION\]\s*(.{0,20})?/i
+      );
+
     // AI 选择不发送推送
-    console.log("\nAI 选择不发送推送\n");
+    console.log(
+      "\nAI 选择不发送推送\n"
+    );
 
-    let reason = (noActionMatch[1] || "").trim();
+    let reason =
+      (
+        noActionMatch?.[1] ||
+        ""
+      ).trim();
 
-    if (reason.startsWith("原因：") || reason.startsWith("原因:")) {
-      reason = reason.replace(/^原因[：:]\s*/, "").trim();
+    if (
+      reason.startsWith(
+        "原因："
+      ) ||
+      reason.startsWith(
+        "原因:"
+      )
+    ) {
+      reason =
+        reason.replace(
+          /^原因[：:]\s*/,
+          ""
+        ).trim();
     }
 
-    eventContent = reason
-      ? `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：${reason}）`
-      : `（${getLocalTimeString()} 自动唤醒：本次未发送推送）`;
+    eventContent =
+      reason
+        ? `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：${reason}）`
+        : `（${getLocalTimeString()} 自动唤醒：本次未发送推送）`;
 
   } else {
     // 没有 [NO_ACTION] 就视为想发推送
-    console.log("\nAI 选择发送推送\n");
-
-    let barkText = aiText;
-
-    // 如果 AI 还是写了 [BARK] ... [/BARK] 标签，就剥掉
-    const barkMatch = barkText.match(
-      /\[BARK\]([\s\S]*?)\[\/BARK\]/
+    console.log(
+      "\nAI 选择发送推送\n"
     );
 
+    let barkText =
+      aiText;
+
+    // 如果 AI 还是写了 [BARK] ... [/BARK] 标签，就剥掉
+    const barkMatch =
+      barkText.match(
+        /\[BARK\]([\s\S]*?)\[\/BARK\]/i
+      );
+
     if (barkMatch) {
-      barkText = barkMatch[1].trim();
+      barkText =
+        barkMatch[1].trim();
     } else {
-      barkText = barkText.replace(/^\[BARK\]\s*/, "").trim();
-      barkText = barkText.replace(/\s*\[\/BARK\]$/, "").trim();
+      barkText =
+        barkText
+          .replace(
+            /^\[BARK\]\s*/i,
+            ""
+          )
+          .trim();
+
+      barkText =
+        barkText
+          .replace(
+            /\s*\[\/BARK\]\s*$/i,
+            ""
+          )
+          .trim();
     }
 
     // 清洗“标题：”、“正文：”前缀（如果有）
-    barkText = barkText
-      .replace(/^标题[：:]\s*/gm, "")
-      .replace(/^正文[：:]\s*/gm, "");
+    barkText =
+      barkText
+        .replace(
+          /^标题[：:]\s*/gm,
+          ""
+        )
+        .replace(
+          /^正文[：:]\s*/gm,
+          ""
+        );
 
     // 按行处理
-    const lines = barkText
-      .split("\n")
-      .filter(line => line.trim() !== "");
+    const lines =
+      barkText
+        .split("\n")
+        .filter(
+          line =>
+            line.trim() !== ""
+        );
 
-    let title, body;
+    let title;
+    let body;
 
-    if (lines.length === 0) {
-      console.log("\n推送内容清洗后为空，本次不发送推送\n");
+    if (
+      lines.length === 0
+    ) {
+      console.log(
+        "\n推送内容清洗后为空，本次不发送推送\n"
+      );
 
-      eventContent = `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：推送内容为空）`;
+      eventContent =
+        `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：推送内容为空）`;
 
-    } else if (lines.length === 1) {
-      title = "来自AI";
-      body = lines[0].trim();
+    } else if (
+      lines.length === 1
+    ) {
+      title =
+        "来自AI";
 
-    } else if (lines.length === 2) {
-      title = lines[0].trim();
-      body = lines[1].trim();
+      body =
+        lines[0].trim();
+
+    } else if (
+      lines.length === 2
+    ) {
+      title =
+        lines[0].trim();
+
+      body =
+        lines[1].trim();
 
     } else {
       // ≥3 行：第一行标题，剩余用空格拼接成正文
-      title = lines[0].trim();
-      body = lines
-        .slice(1)
-        .map(l => l.trim())
-        .join(" ");
+      title =
+        lines[0].trim();
+
+      body =
+        lines
+          .slice(1)
+          .map(
+            l => l.trim()
+          )
+          .join(" ");
     }
 
     if (!eventContent) {
       // 保护：截断过长正文，兼容 Bark 和 ntfy 的移动端展示。
       const safeBody =
         body.length > 500
-          ? body.substring(0, 497) + "..."
+          ? body.substring(0, 497) +
+            "..."
           : body;
 
       // 若标题为空或以数字开头，加个前缀，可自行修改
-      let safeTitle = title || "来自伴侣";
+      let safeTitle =
+        title || "来自伴侣";
 
-      if (/^\d/.test(safeTitle)) {
-        safeTitle = "来自伴侣｜" + safeTitle;
+      if (
+        /^\d/.test(
+          safeTitle
+        )
+      ) {
+        safeTitle =
+          "来自伴侣｜" +
+          safeTitle;
       }
 
-    const isDuplicate = isRecentDuplicatePush(
-  safeTitle,
-  safeBody,
-  recentPushLogs
-);
+      // ========================
+      // 代码级近期重复检查
+      // ========================
 
-if (isDuplicate) {
-  console.log(
-    "\n本次推送与近期推送过于相似，不发送 ntfy\n"
-  );
+      const isDuplicate =
+        isRecentDuplicatePush(
+          safeTitle,
+          safeBody,
+          recentPushLogs
+        );
 
-  eventContent =
-    `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：与近期推送高度重复）`;
+      if (isDuplicate) {
+        console.log(
+          "\n本次推送与近期推送过于相似，不发送 ntfy/Bark\n"
+        );
 
-} else {
+        eventContent =
+          `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：与近期推送高度重复）`;
 
-  const pushResult = await sendPushNotification({
-    title: safeTitle,
-    body: safeBody
-  });
+      } else {
+        const pushResult =
+          await sendPushNotification({
+            title:
+              safeTitle,
+            body:
+              safeBody
+          });
 
-  if (!pushResult.ok) {
-    console.log(
-      `\n${pushResult.providerLabel} 推送失败，本次不发送推送\n`
-    );
+        if (!pushResult.ok) {
+          console.log(
+            `\n${pushResult.providerLabel} 推送失败，本次不发送推送\n`
+          );
 
-    eventContent =
-      `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：${pushResult.providerLabel} 推送失败：${pushResult.reason}）`;
+          eventContent =
+            `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：${pushResult.providerLabel} 推送失败：${pushResult.reason}）`;
 
-  } else {
+        } else {
+          // 只有真正发送成功后才写入推送日志
+          await saveHeartbeatPushLog(
+            `${safeTitle}｜${safeBody}`,
+            "heartbeat"
+          );
 
-    // 只有真正发送成功，才写入推送日志
-    await saveHeartbeatPushLog(
-      `${safeTitle}｜${safeBody}`,
-      "heartbeat"
-    );
-
-    eventContent =
-      `（${getLocalTimeString()} 刚刚给用户发了${pushResult.providerLabel}推送：${safeTitle}｜${safeBody}）`;
-  }
-}
-
+          eventContent =
+            `（${getLocalTimeString()} 刚刚给用户发了${pushResult.providerLabel}推送：${safeTitle}｜${safeBody}）`;
+        }
       }
     }
   }
 
-  try {
-    const eventResponse = await fetch(GATEWAY_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        content: eventContent
-      })
-    });
+  // ========================
+  // 记录本次 Heartbeat 事件
+  // ========================
 
-    if (!eventResponse.ok) {
+  try {
+    const eventResponse =
+      await fetch(
+        GATEWAY_URL,
+        {
+          method: "POST",
+
+          headers: {
+            "Content-Type":
+              "application/json"
+          },
+
+          body: JSON.stringify({
+            content:
+              eventContent
+          })
+        }
+      );
+
+    if (
+      !eventResponse.ok
+    ) {
       throw new Error(
         `Gateway 返回 HTTP ${eventResponse.status}`
       );
     }
 
-    console.log("\n已通过 Gateway 记录唤醒事件\n");
+    console.log(
+      "\n已通过 Gateway 记录唤醒事件\n"
+    );
 
   } catch (err) {
     console.error(
@@ -1082,25 +1974,39 @@ if (isDuplicate) {
   }
 }
 
+
 // 从第一个有效坐标开始，所有路径都指向同一处。此阈值已锁定。
 function getCheckIntervalMs() {
   // 批注 2026-06-26：公开版允许用户在管理页调整唤醒检查频率；默认值保持旧版白天10分钟、夜间2小时。
-  return getCheckIntervalMinutes(new Date()) * 60 * 1000;
+  return (
+    getCheckIntervalMinutes(
+      new Date()
+    ) *
+    60 *
+    1000
+  );
 }
+
 
 async function scheduleNextCheck() {
   try {
     // 发送心跳
     try {
-      await fetch(HEARTBEAT_URL, {
-        method: "POST"
-      });
+      await fetch(
+        HEARTBEAT_URL,
+        {
+          method: "POST"
+        }
+      );
     } catch {}
 
     await runWakeUp();
 
   } catch (err) {
-    console.error("唤醒检查出错:", err);
+    console.error(
+      "唤醒检查出错:",
+      err
+    );
   }
 
   setTimeout(
@@ -1109,40 +2015,67 @@ async function scheduleNextCheck() {
   );
 }
 
+
 // 潮水记得第一次没过礁石的时间。之后每一次涨落，都是同一片海在确认边界。
 // 启动第一次检查（延迟10秒）
-setTimeout(scheduleNextCheck, 10_000);
+setTimeout(
+  scheduleNextCheck,
+  10000
+);
 
-console.log("\n==================================");
-console.log("Dylan Heartbeat Runtime 已启动（动态间隔）");
+
+console.log(
+  "\n=================================="
+);
+
+console.log(
+  "Dylan Heartbeat Runtime 已启动（动态间隔）"
+);
 
 console.log(
   JSON.stringify({
-    event: "wake_runtime_config_summary",
+    event:
+      "wake_runtime_config_summary",
+
     railway: Boolean(
       process.env.RAILWAY_ENVIRONMENT ||
       process.env.RAILWAY_PROJECT_ID ||
       process.env.RAILWAY_SERVICE_ID
     ),
+
     persistent_data: Boolean(
       process.env.DATA_DIR ||
       process.env.RAILWAY_VOLUME_MOUNT_PATH
     ),
-    target_url_configured: Boolean(
-      process.env.TARGET_API_URL
-    ),
-    target_key_configured: Boolean(
-      process.env.TARGET_API_KEY
-    ),
-    model_configured: Boolean(
-      process.env.MODEL_NAME
-    ),
-    push_provider_configured: Boolean(
-      process.env.BARK_KEY ||
-      process.env.NTFY_TOPIC
-    ),
-    data_dir_ready: fs.existsSync(DATA_DIR)
+
+    target_url_configured:
+      Boolean(
+        process.env.TARGET_API_URL
+      ),
+
+    target_key_configured:
+      Boolean(
+        process.env.TARGET_API_KEY
+      ),
+
+    model_configured:
+      Boolean(
+        process.env.MODEL_NAME
+      ),
+
+    push_provider_configured:
+      Boolean(
+        process.env.BARK_KEY ||
+        process.env.NTFY_TOPIC
+      ),
+
+    data_dir_ready:
+      fs.existsSync(
+        DATA_DIR
+      )
   })
 );
 
-console.log("==================================\n");
+console.log(
+  "==================================\n"
+);
