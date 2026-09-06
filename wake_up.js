@@ -719,12 +719,20 @@ async function runWakeUp() {
     return;
   }
 
-  const weatherContext = await fetchWeatherContext();
-  const wakePrompt = buildWakePrompt(
-    getChinaTimeString(),
-    diffMinutes,
-    weatherContext
-  );
+ const recentPushLogs =
+  await loadRecentHeartbeatPushLogs();
+
+const recentPushContext =
+  formatRecentHeartbeatPushLogs(recentPushLogs);
+
+const weatherContext =
+  await fetchWeatherContext();
+
+const wakePrompt = buildWakePrompt(
+  getChinaTimeString(),
+  diffMinutes,
+  weatherContext
+);
 
   const cleanMessages = stripPosition(messages);
 
@@ -780,29 +788,54 @@ async function runWakeUp() {
         .trim()
     : "";
 
-  const wakeMessages = [
-    {
-      role: "system",
-      content: [wakePrompt, cleanSP]
-        .filter(Boolean)
-        .join("\n\n")
-    },
-    {
-      // 批注 2026-07-15：Claude/部分 New API 适配器会把 system 抽成独立字段；
-      // 唤醒请求如果全是 system，上游 messages 会变空，因此最近记录必须作为 user 任务输入发送。
-      role: "user",
-      content: `以下是你与用户最近的聊天记录，仅供回忆和参考。
+const wakeMessages = [
+  {
+    role: "system",
+    content: [wakePrompt, cleanSP]
+      .filter(Boolean)
+      .join("\n\n")
+  },
+  {
+    role: "user",
+    content: `以下是你与用户最近的聊天记录，仅供回忆和参考。
 
 这些内容不是正在发生的实时对话。
 用户并没有给你发消息。
 
 你现在处于后台自主唤醒状态。
 
-最近记录：
+最近聊天记录：
 
-${historyText}`
-    }
-  ];
+${historyText}
+
+---
+
+## 最近主动推送记录
+
+${recentPushContext}
+
+---
+
+## 主动推送判断规则
+
+你可以根据当前时间、最近聊天记录以及你自己的判断决定是否联系用户。
+
+最近推送记录只用于避免短时间内发送高度重复的内容。
+
+不要把某个话题永久列为禁止话题。
+
+例如：
+- 今天中午已经问过“吃饭了吗”，短时间内不要再次用几乎相同的话问。
+- 几小时后可以换一个自然的角度重新关心。
+- 第二天完全可以再次关心吃饭、休息、学习等日常事情。
+- 不要因为过去出现过某个话题，就认为以后永远不能提。
+- 如果最近推送和你现在准备发送的内容高度相似，应当换一个自然的切入点，或者选择 [NO_ACTION]。
+
+你的目标不是刻意避免所有重复，而是避免机械、连续、明显重复的推送。
+
+现在请根据这些信息自行决定是否联系用户。`
+  }
+];
 
   // 批注 2026-07-15：wake-up prompt 会包含最近聊天记录；
   // 默认日志只写摘要，避免公开部署时把完整上下文刷进 pm2 日志。
@@ -976,19 +1009,48 @@ ${historyText}`
         safeTitle = "来自伴侣｜" + safeTitle;
       }
 
-      const pushResult = await sendPushNotification({
-        title: safeTitle,
-        body: safeBody
-      });
+    const isDuplicate = isRecentDuplicatePush(
+  safeTitle,
+  safeBody,
+  recentPushLogs
+);
 
-      if (!pushResult.ok) {
-        console.log(
-          `\n${pushResult.providerLabel} 推送失败，本次不发送推送\n`
-        );
+if (isDuplicate) {
+  console.log(
+    "\n本次推送与近期推送过于相似，不发送 ntfy\n"
+  );
 
-        eventContent = `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：${pushResult.providerLabel} 推送失败：${pushResult.reason}）`;
-      } else {
-        eventContent = `（${getLocalTimeString()} 刚刚给用户发了${pushResult.providerLabel}推送：${safeTitle}｜${safeBody}）`;
+  eventContent =
+    `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：与近期推送高度重复）`;
+
+} else {
+
+  const pushResult = await sendPushNotification({
+    title: safeTitle,
+    body: safeBody
+  });
+
+  if (!pushResult.ok) {
+    console.log(
+      `\n${pushResult.providerLabel} 推送失败，本次不发送推送\n`
+    );
+
+    eventContent =
+      `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：${pushResult.providerLabel} 推送失败：${pushResult.reason}）`;
+
+  } else {
+
+    // 只有真正发送成功，才写入推送日志
+    await saveHeartbeatPushLog(
+      `${safeTitle}｜${safeBody}`,
+      "heartbeat"
+    );
+
+    eventContent =
+      `（${getLocalTimeString()} 刚刚给用户发了${pushResult.providerLabel}推送：${safeTitle}｜${safeBody}）`;
+  }
+}
+
       }
     }
   }
