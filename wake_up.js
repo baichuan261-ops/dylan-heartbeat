@@ -925,7 +925,7 @@ async function fetchWeatherContext() {
 
 async function loadTimelineMessages() {
   try {
-    const {
+       const {
       data,
       error
     } = await supabase
@@ -936,9 +936,10 @@ async function loadTimelineMessages() {
       .order(
         "created_at",
         {
-          ascending: true
+          ascending: false
         }
-      );
+      )
+      .limit(300);
 
     if (error) {
       throw error;
@@ -959,7 +960,9 @@ async function loadTimelineMessages() {
       `📚 从 Supabase 加载了 ${data.length} 条时间线记录`
     );
 
-    return data;
+      // 数据库倒序取最新记录，
+    // 返回前恢复为从旧到新的聊天顺序。
+    return [...data].reverse();
 
   } catch (e) {
     console.log(
