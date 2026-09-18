@@ -1158,9 +1158,29 @@ async function saveHeartbeatTimelineEvent(
     if (error) {
       throw error;
     }
+const {
+  error: messagesError
+} = await supabase
+  .from('messages')
+  .insert({
+    session_id: 1,
+    role: 'assistant',
+    content: cleanContent,
+    visible: true
+  });
 
+if (messagesError) {
+  console.error(
+    '❌ 主动推送写入 messages 失败:',
+    messagesError.message
+  );
+} else {
+  console.log(
+    '💬 主动推送已写回 messages，本体下次对话可见'
+  );
+}
     console.log(
-      "🧠 主动推送已写回 Supabase timeline，本体下次对话可见"
+      "🧠 主动推送已写回 Supabase timeline"
     );
 
     return true;
