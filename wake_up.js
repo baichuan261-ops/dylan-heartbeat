@@ -1097,6 +1097,80 @@ async function saveHeartbeatPushLog(
   }
 }
 
+function getLatestHeartbeatPushTime(
+  logs = []
+) {
+  for (const log of logs) {
+    const timestamp =
+      Date.parse(log?.created_at);
+
+    if (Number.isFinite(timestamp)) {
+      return new Date(timestamp);
+    }
+  }
+
+  return null;
+}
+
+
+async function saveHeartbeatTimelineEvent(
+  content
+) {
+  const cleanContent =
+    String(content || "").trim();
+
+  if (!cleanContent) {
+    return false;
+  }
+
+  const row = {
+    role: "assistant",
+    content: cleanContent
+  };
+
+  try {
+    let { error } =
+      await supabase
+        .from("timeline")
+        .insert(row);
+
+    // 兼容 session_id 必填的 timeline 表。
+    if (
+      error &&
+      /session_id/i.test(
+        `${error.message || ""} ${error.details || ""}`
+      )
+    ) {
+      const retry =
+        await supabase
+          .from("timeline")
+          .insert({
+            ...row,
+            session_id: 1
+          });
+
+      error = retry.error;
+    }
+
+    if (error) {
+      throw error;
+    }
+
+    console.log(
+      "🧠 主动推送已写回 Supabase timeline，本体下次对话可见"
+    );
+
+    return true;
+
+  } catch (err) {
+    console.log(
+      "⚠️ 主动推送写回 timeline 失败:",
+      err.message
+    );
+
+    return false;
+  }
+}
 
 // ========================
 // Push similarity
@@ -2062,6 +2136,24 @@ async function runWakeUp() {
       recentPushLogs
     );
 
+  const latestPushTime =
+    getLatestHeartbeatPushTime(
+      recentPushLogs
+    );
+
+  // 已经主动推送过，而用户之后没有发送新消息：
+  // 不再拿同一批旧对话反复生成新说法。
+  if (
+    latestPushTime &&
+    latestPushTime >= lastUserTime
+  ) {
+    console.log(
+      "\n上一条主动推送后没有新的用户消息，本轮不再消费旧对话\n"
+    );
+
+    return;
+  }
+
   const weatherContext =
     await fetchWeatherContext();
 
@@ -2290,6 +2382,7 @@ ${recentChangesText}
     diaryResult.remainingText;
 
   let eventContent;
+  let pushWasSent = false;
 
   if (!aiText) {
     console.log(
@@ -2491,21 +2584,39 @@ ${recentChangesText}
             `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：${pushResult.providerLabel} 推送失败：${pushResult.reason}）`;
 
         } else {
-          await saveHeartbeatPushLog(
-            `${safeTitle}｜${safeBody}`,
-            "heartbeat"
-          );
-
-          eventContent =
+             eventContent =
             `（${getLocalTimeString()} 刚刚给用户发了${pushResult.providerLabel}推送：${safeTitle}｜${safeBody}）`;
+
+          await Promise.all([
+            saveHeartbeatPushLog(
+              `${safeTitle}｜${safeBody}`,
+              "heartbeat"
+            ),
+
+            saveHeartbeatTimelineEvent(
+              eventContent
+            )
+          ]);
+
+          pushWasSent = true;
         }
       }
     }
   }
 
-  // ========================
+   // ========================
   // Gateway 记录 Heartbeat 事件
   // ========================
+
+  // 没有真正发出去的内部检查，
+  // 只留在 Render 日志里，不污染本体上下文。
+  if (!pushWasSent) {
+    console.log(
+      "\n本轮没有成功推送，不向主聊天写入内部检查记录\n"
+    );
+
+    return;
+  }
 
   try {
     const eventResponse =
