@@ -1104,6 +1104,8 @@ function getLatestHeartbeatPushTime(
   logs = []
 ) {
   for (const log of logs) {
+    // Weather notifications must not consume the pending conversational follow-up.
+    if (String(log?.trigger_type || "").startsWith("weather:")) continue;
     const timestamp =
       Date.parse(log?.created_at);
 
@@ -2696,6 +2698,106 @@ function getCheckIntervalMs() {
 }
 
 
+// Independent weather lane. Forecast timestamps are Unix seconds (UTC).
+function weatherCandidates(data, nowMs = Date.now()) {
+  const current = data?.current;
+  const hourly = data?.hourly;
+  const finite = value => typeof value === "number" && Number.isFinite(value);
+  if (!current || !finite(current.time) ||
+      Math.abs(current.time * 1000 - nowMs) > 90 * 60000) return [];
+  const result = [];
+  const rows = (Array.isArray(hourly?.time) ? hourly.time : [])
+    .map((time, i) => ({ time, temp: hourly.temperature_2m?.[i],
+      rain: hourly.rain?.[i], showers: hourly.showers?.[i],
+      probability: hourly.precipitation_probability?.[i] }))
+    .filter(row => finite(row.time) && row.time * 1000 > nowMs &&
+      row.time * 1000 <= nowMs + 6 * 3600000);
+  const nearRain = rows.find(row => row.time * 1000 <= nowMs + 2 * 3600000 &&
+    finite(row.rain) && finite(row.showers) && row.rain + row.showers >= 0.2 &&
+    finite(row.probability) && row.probability >= 70);
+  const raining = finite(current.rain) && finite(current.showers) &&
+    current.rain + current.showers >= 0.1;
+  if (raining || nearRain) result.push({kind: "rain", facts: raining
+    ? "天气模型当前数据提示有降雨；不是现场观测，不能断言用户所在位置已经下雨。"
+    : `未来两小时有降雨预报，概率 ${nearRain.probability}%，该小时雨量约 ${(nearRain.rain + nearRain.showers).toFixed(1)} mm。`});
+  const cold = rows.filter(row => finite(row.temp)).sort((a,b) => a.temp-b.temp)[0];
+  if (finite(current.temperature_2m) && cold && cold.temp <= 18 &&
+      current.temperature_2m - cold.temp >= 5) result.push({kind: "cold",
+    facts: `当前预报温度 ${current.temperature_2m}°C，未来六小时最低预计 ${cold.temp}°C，下降至少5°C。`});
+  return result;
+}
+
+let weatherNextCheckAt = 0;
+const weatherSentThisProcess = new Map();
+async function runWeatherReminder() {
+  if (!readBooleanEnv("WEATHER_ENABLED", false) ||
+      !readBooleanEnv("WEATHER_ALERTS_ENABLED", true)) return false;
+  const now = new Date();
+  const hour = getHourInTimeZone(now, TIME_ZONE);
+  // Quiet hours are independent of the conversation's wake thresholds.
+  if (hour < 8 || hour >= 22 || now.getTime() < weatherNextCheckAt) return false;
+  weatherNextCheckAt = now.getTime() + 30 * 60000;
+  try {
+    const rawLat = String(process.env.WEATHER_LAT ?? "").trim();
+    const rawLon = String(process.env.WEATHER_LON ?? "").trim();
+    const lat = Number(rawLat), lon = Number(rawLon);
+    if (!rawLat || !rawLon || !Number.isFinite(lat) || !Number.isFinite(lon) ||
+        Math.abs(lat) > 90 || Math.abs(lon) > 180) throw new Error("天气经纬度无效");
+    const locationKey = `${lat.toFixed(2)},${lon.toFixed(2)}`;
+    const url = new URL("https://api.open-meteo.com/v1/forecast");
+    url.search = new URLSearchParams({latitude: String(lat), longitude: String(lon),
+      current: "temperature_2m,rain,showers", hourly: "temperature_2m,rain,showers,precipitation_probability",
+      temperature_unit: "celsius", timeformat: "unixtime", timezone: "UTC", forecast_days: "2"}).toString();
+    const response = await fetch(url, {signal: AbortSignal.timeout(WEATHER_TIMEOUT_MS)});
+    if (!response.ok) throw new Error(`天气 HTTP ${response.status}`);
+    const candidates = weatherCandidates(await response.json(), now.getTime());
+    if (!candidates.length) {
+      console.log("🌦️ 天气独立检查：没有达到降雨/降温提醒条件");
+      return false;
+    }
+    let sent = false;
+    for (const candidate of candidates) {
+      const key = `weather:${candidate.kind}:${locationKey}`;
+      const since = new Date(now.getTime() - 24 * 3600000).toISOString();
+      // Read failures fail closed: do not risk repeating a notification after restart.
+      const {data: prior, error} = await supabase.from("heartbeat_push_logs")
+        .select("created_at").eq("trigger_type", key).gte("created_at", since).limit(1);
+      if (error) throw error;
+      if (prior?.length || (weatherSentThisProcess.get(key) || 0) > now.getTime() - 24 * 3600000) {
+        console.log(`🌦️ ${candidate.kind}：24小时内已提醒，跳过`);
+        continue;
+      }
+      const location = process.env.WEATHER_LOCATION_NAME || "配置地点";
+      const decision = await callWakeModel([
+        {role: "system", content: "你执行独立天气提醒。只根据给定天气事实决定是否值得提醒。可以输出 [NO_ACTION]；否则只输出一条不超过120字的自然中文提醒，不写标题、标签或日记。称数据为预报或预计，不编造现场观测、用户位置、衣着、日程或身体状态。建议带伞/添衣时使用‘如果要出门’等条件句。"},
+        {role: "user", content: `当前时间：${getChinaTimeString()}。配置地点：${location}。${candidate.facts}`}
+      ]);
+      const body = normalizeContentToText(decision.choices?.[0]?.message?.content).trim();
+      if (!body || /^\[NO_ACTION\]/i.test(body)) {
+        console.log(`🌦️ ${candidate.kind}：模型选择不提醒`);
+        continue;
+      }
+      if (body.length > 200 || /\[(?:DIARY|BARK)\]/i.test(body)) {
+        console.log("🌦️ 天气输出格式不合规，本轮跳过");
+        continue;
+      }
+      const pushed = await sendPushNotification({title: `${location}天气提醒`, body});
+      if (!pushed.ok) { console.log("🌦️ 天气推送未成功，不记录已发送"); continue; }
+      weatherSentThisProcess.set(key, now.getTime());
+      const saved = await saveHeartbeatPushLog(body, key);
+      if (!saved) console.error("🌦️ 去重记录保存失败，重启后可能重复，请检查数据库");
+      await saveHeartbeatTimelineEvent(`（${getLocalTimeString()} 已发送天气推送：${body}）`);
+      console.log(`🌦️ ${candidate.kind}：天气推送成功`);
+      sent = true;
+      break; // At most one weather notification per check.
+    }
+    return sent;
+  } catch (error) {
+    console.log("🌦️ 天气提醒本轮跳过：", error.message);
+    return false;
+  }
+}
+
 async function scheduleNextCheck() {
   try {
     try {
@@ -2707,7 +2809,9 @@ async function scheduleNextCheck() {
       );
     } catch {}
 
-    await runWakeUp();
+    // Do not send both a weather reminder and a conversational push in one tick.
+    const weatherSent = await runWeatherReminder();
+    if (!weatherSent) await runWakeUp();
 
   } catch (err) {
     console.error(
