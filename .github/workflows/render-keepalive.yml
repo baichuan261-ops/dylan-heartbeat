@@ -2,11 +2,13 @@ name: Keep Render Services Alive
 
 on:
   schedule:
-    # 白天：每 30 分钟唤醒 heartbeat
-    - cron: "*/30 0-15 * * *"
+    # GitHub Actions 使用 UTC。
+    # 北京时间 08:07-23:37：每 30 分钟唤醒一次。
+    # 刻意避开整点和半点，减少公共调度高峰造成的延迟。
+    - cron: "7,37 0-15 * * *"
 
-    # 晚上：每 10 分钟唤醒 heartbeat
-    - cron: "*/10 16-23 * * *"
+    # 北京时间夜间约每 4 小时唤醒一次：00:17、04:17。
+    - cron: "17 16,20 * * *"
 
   workflow_dispatch:
 
