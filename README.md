@@ -1,5 +1,13 @@
 # Dylan Heartbeat — AI Residency Runtime for Kelivo
 
+### 此 fork 的定时推送修复（2026-09-26）
+
+- 没有新用户消息时，成功主动推送后默认冷却 240 分钟，再允许模型判断是否联系；可用 `HEARTBEAT_REPEAT_AFTER_MINUTES` 调整。用户发来新消息后仍按原有昼夜静默阈值判断。
+- 四小时是允许再次判断的间隔，不保证一定推送。模型仍可选择 `[NO_ACTION]`，近期高度重复的内容仍会被拦截。天气提醒继续使用独立去重规则。
+- Actions 全天每 10 分钟请求服务，冷启动最多等待 120 秒并重试两次。健康检查成功只证明 Gateway 可访问，不代表 wake-up 正常或手机收到推送。
+- GitHub 定时任务可能延迟或丢失，Render 免费服务闲置 15 分钟会休眠，因此此配置不能保证精确四小时送达。需要严格计时时应使用持续运行的服务或独立可靠调度器。
+- Render 需要部署最新代码，并同时启动 Gateway 和 wake-up（例如 `npm run start:railway`）；仅启动 `npm start` 不会运行推送进程。已有部署若未自动更新，需要在 Render 重新部署。
+
 **一个给 Kelivo AI伴侣使用的常驻插件。**  
 它会自动唤醒 Kelivo 的AI伴侣，并让伴侣自己判断是否要主动联系你。
 

@@ -2,37 +2,41 @@ name: Keep Render Services Alive
 
 on:
   schedule:
-    # GitHub Actions 使用 UTC。
-    # 北京时间 08:07-23:37：每 30 分钟唤醒一次。
-    # 刻意避开整点和半点，减少公共调度高峰造成的延迟。
-    - cron: "7,37 0-15 * * *"
-
-    # 北京时间夜间约每 4 小时唤醒一次：00:17、04:17。
-    - cron: "17 16,20 * * *"
+    # 保活与推送间隔独立：Render 免费服务闲置 15 分钟会休眠。
+    # 全天每 10 分钟请求一次；推送冷却/昼夜策略由 wake_up.js 控制。
+    # GitHub schedule 仍可能延迟，不能保证精确计时。
+    - cron: "7,17,27,37,47,57 * * * *"
 
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   keep-heartbeat-alive:
     runs-on: ubuntu-latest
+    timeout-minutes: 8
 
     steps:
       - name: Wake heartbeat
         run: |
           echo "Waking heartbeat service..."
-          curl -fsS --max-time 30 \
+          curl -fsS --connect-timeout 15 --max-time 120 \
+            --retry 2 --retry-all-errors --retry-delay 10 \
             "https://lin-heartbeat.onrender.com/healthz"
           echo ""
-          echo "Heartbeat responded successfully."
+          echo "Gateway health check passed; this does not confirm a notification was sent."
 
   keep-ntfy-alive:
     runs-on: ubuntu-latest
+    timeout-minutes: 8
 
     steps:
       - name: Wake ntfy
         run: |
           echo "Waking ntfy service..."
-          curl -fsS --max-time 30 \
+          curl -fsS --connect-timeout 15 --max-time 120 \
+            --retry 2 --retry-all-errors --retry-delay 10 \
             "https://ntfy-service.onrender.com/"
           echo ""
           echo "ntfy responded successfully."

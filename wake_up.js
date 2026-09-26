@@ -3,6 +3,7 @@ require("dotenv").config({ quiet: true });
 const fs = require("fs");
 const path = require("path");
 const { buildNtfyPayload } = require("./ntfy_priority");
+const { remainingWakeCooldownMs } = require("./wake_cooldown");
 const { createClient } = require("@supabase/supabase-js");
 
 const supabase = createClient(
@@ -2166,14 +2167,14 @@ async function runWakeUp() {
       recentPushLogs
     );
 
-  // 已经主动推送过，而用户之后没有发送新消息：
-  // 不再拿同一批旧对话反复生成新说法。
-  if (
-    latestPushTime &&
-    latestPushTime >= lastUserTime
-  ) {
+  // 没有新消息时只冷却四小时，不能永久关闭后续主动联系。
+  const cooldownMs = remainingWakeCooldownMs(
+    lastUserTime, latestPushTime, now,
+    readNumberEnv("HEARTBEAT_REPEAT_AFTER_MINUTES", 240, { min: 1 })
+  );
+  if (cooldownMs > 0) {
     console.log(
-      "\n上一条主动推送后没有新的用户消息，本轮不再消费旧对话\n"
+      `\n主动推送冷却中，约 ${Math.ceil(cooldownMs / 60000)} 分钟后可再次判断\n`
     );
 
     return;
@@ -2804,7 +2805,8 @@ async function scheduleNextCheck() {
       await fetch(
         HEARTBEAT_URL,
         {
-          method: "POST"
+          method: "POST",
+          signal: AbortSignal.timeout(10000)
         }
       );
     } catch {}
