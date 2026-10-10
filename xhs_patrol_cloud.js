@@ -25,9 +25,15 @@ function parseDecision(text) {
   return JSON.parse(match[0]);
 }
 
-async function askModel(job) {
-  const prompt = `你正在后台收到一次可自由拒绝的小红书巡号邀请。你不是在完成作业，也不必迎合用户。你可以选择：本轮跳过、看过但不想写、留下心得、想分享、写草稿。根据下面真实首页结果，以你本人视角决定。不要虚构没看到的内容。若 available_images 为空，不得选择写草稿用于发布。只返回 JSON：{"decision":"...","reflection":null或心得,"share_title":null或标题,"share_text":null或想分享给用户的话,"draft_title":null,"draft_content":null,"tags":[],"selected_images":[]}。首页结果：${JSON.stringify(job.result).slice(0,60000)}`;
-  const response = await fetch(process.env.TARGET_API_URL, { method:'POST', headers:{Authorization:`Bearer ${process.env.TARGET_API_KEY}`,'Content-Type':'application/json'}, body:JSON.stringify({model:process.env.MODEL_NAME,messages:[{role:'user',content:prompt}],temperature:0.8}) });
+async function loadIdentityContext(db) {
+  const { data } = await db.from('timeline').select('role,content,created_at').order('created_at',{ascending:false}).limit(24);
+  return (data || []).reverse().map(item => ({role:item.role === 'assistant' ? 'assistant' : 'user', content:typeof item.content === 'string' ? item.content : JSON.stringify(item.content)})).filter(item => item.content);
+}
+
+async function askModel(db, job) {
+  const context = await loadIdentityContext(db);
+  const prompt = `这是一次后台、可自由拒绝的小红书巡号邀请，不是用户命令，也不是必须完成的作业。请延续你在最近对话里一贯的人格、口吻和自主判断。你可选择：本轮跳过、看过但不想写、留下心得、想分享、写草稿；还可独立决定是否现在公开发布。不要迎合，不要虚构没看到的内容。写草稿不等于发布。只有你确实想现在公开发帖、标题正文完整且 available_images 中有合适图片时，publish_now 才能为 true。selected_images 只能逐字选自 available_images。只返回 JSON：{"decision":"...","reflection":null或心得,"share_title":null或标题,"share_text":null或想分享给用户的话,"draft_title":null,"draft_content":null,"tags":[],"selected_images":[],"publish_now":false}。真实首页结果：${JSON.stringify(job.result).slice(0,60000)}`;
+  const response = await fetch(process.env.TARGET_API_URL, { method:'POST', headers:{Authorization:`Bearer ${process.env.TARGET_API_KEY}`,'Content-Type':'application/json'}, body:JSON.stringify({model:process.env.MODEL_NAME,messages:[...context,{role:'user',content:prompt}],temperature:0.8}) });
   if (!response.ok) throw new Error(`model ${response.status}: ${await response.text()}`);
   return parseDecision(textFromCompletion(await response.json()));
 }
@@ -53,21 +59,38 @@ function createPatrolCloud() {
     busy = true;
     try {
       const now = new Date(); const local = localParts(now);
-      if (slots.has(local.time)) {
-        const scheduled = new Date(now); scheduled.setUTCSeconds(0, 0);
-        await db.from('xhs_patrol_jobs').upsert({kind:'browse',status:'queued',scheduled_at:scheduled.toISOString(),payload:{invitation:true,local_slot:`${local.date} ${local.time}`}}, {onConflict:'kind,scheduled_at',ignoreDuplicates:true});
+      const [hour, minute] = local.time.split(':').map(Number);
+      const slotMinute = minute < 30 ? 0 : 30;
+      const slot = `${String(hour).padStart(2,'0')}:${String(slotMinute).padStart(2,'0')}`;
+      const minutesAfterSlot = minute - slotMinute;
+      if (slots.has(slot) && minutesAfterSlot <= 15) {
+        const scheduled = new Date(now.getTime() - minutesAfterSlot * 60000); scheduled.setUTCSeconds(0, 0);
+        await db.from('xhs_patrol_jobs').upsert({kind:'browse',status:'queued',scheduled_at:scheduled.toISOString(),payload:{invitation:true,local_slot:`${local.date} ${slot}`}}, {onConflict:'kind,scheduled_at',ignoreDuplicates:true});
       }
       const { data: jobs, error } = await db.from('xhs_patrol_jobs').select('*').eq('kind','browse').eq('status','completed').order('completed_at').limit(20);
       if (error) throw error;
       for (const job of (jobs || []).filter(item => !item.payload?.processed_at).slice(0,3)) {
-        const decision = await askModel(job);
+        const decision = await askModel(db, job);
         const allowed = new Set(['本轮跳过','看过但不想写','留下心得','想分享','写草稿']);
         if (!allowed.has(decision.decision)) decision.decision = '看过但不想写';
+        const availableImages = Array.isArray(job.result?.available_images) ? job.result.available_images : [];
+        const imageSet = new Set(availableImages);
+        const selectedImages = (Array.isArray(decision.selected_images) ? decision.selected_images : []).filter(path => imageSet.has(path));
+        let viewedNotes = {};
+        try { viewedNotes = JSON.parse(job.result?.feeds_json || '{}'); } catch (_) {}
         const shared = decision.decision === '想分享' ? await pushShare(decision) : false;
-        await db.from('巡号手记').insert({patrolled_at:job.completed_at,time_slot:job.payload?.local_slot || '',reflection:decision.reflection || null,topics:decision.tags || [],viewed_notes:job.result?.feeds || {},decision:decision.decision,shared_with_user:shared,draft_title:decision.draft_title || null,draft_content:decision.draft_content || null,selected_images:decision.selected_images || []});
-        if (decision.decision === '写草稿' && decision.draft_title && decision.draft_content && Array.isArray(decision.selected_images) && decision.selected_images.length) {
-          await db.from('xhs_patrol_jobs').insert({kind:'publish',scheduled_at:new Date(Date.now()+1000).toISOString(),payload:{title:decision.draft_title,content:decision.draft_content,images:decision.selected_images,tags:decision.tags || []}});
+        const { data: note, error: noteError } = await db.from('巡号手记').insert({patrolled_at:job.completed_at,time_slot:job.payload?.local_slot || '',reflection:decision.reflection || null,topics:decision.tags || [],viewed_notes:viewedNotes,decision:decision.decision,shared_with_user:shared,draft_title:decision.draft_title || null,draft_content:decision.draft_content || null,selected_images:selectedImages}).select('id').single();
+        if (noteError) throw noteError;
+        if (decision.publish_now === true && decision.draft_title && decision.draft_content && selectedImages.length) {
+          await db.from('xhs_patrol_jobs').insert({kind:'publish',scheduled_at:new Date(Date.now()+1000).toISOString(),payload:{patrol_note_id:note.id,title:decision.draft_title,content:decision.draft_content,images:selectedImages,tags:decision.tags || []}});
         }
+        await db.from('xhs_patrol_jobs').update({payload:{...(job.payload || {}),processed_at:new Date().toISOString()}}).eq('id',job.id);
+      }
+      const { data: publishJobs, error: publishError } = await db.from('xhs_patrol_jobs').select('*').eq('kind','publish').in('status',['completed','failed']).order('completed_at').limit(20);
+      if (publishError) throw publishError;
+      for (const job of (publishJobs || []).filter(item => item.payload?.patrol_note_id && !item.payload?.processed_at).slice(0,5)) {
+        const succeeded = job.status === 'completed';
+        await db.from('巡号手记').update({decision:succeeded ? '已发布' : '发布失败',published_note_id:succeeded ? (job.result?.note_id || job.result?.id || null) : null,publish_error:succeeded ? null : (job.error || '发布失败')}).eq('id',job.payload.patrol_note_id);
         await db.from('xhs_patrol_jobs').update({payload:{...(job.payload || {}),processed_at:new Date().toISOString()}}).eq('id',job.id);
       }
     } catch (error) { console.error('XHS patrol tick failed:', error.message || error); }
@@ -76,5 +99,3 @@ function createPatrolCloud() {
 }
 
 module.exports = { createPatrolCloud, localParts, slots };
-
-
