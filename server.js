@@ -3,7 +3,6 @@ require("dotenv").config({ quiet: true });
 const Fastify = require("fastify");
 const fs = require("fs-extra");
 const path = require("path");
-const { createClient } = require("@supabase/supabase-js");
 const {
   PROJECT_DIR,
   ensureDataDir,
@@ -21,33 +20,6 @@ const {
 
 const DEFAULT_BODY_LIMIT_MB = 50;
 const CHAT_HISTORY_MESSAGE_LIMIT = 48;
-let timelineSupabase = null;
-
-function getTimelineSupabase() {
-  const url = String(process.env.SUPABASE_URL || "").trim();
-  const key = String(process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY || "").trim();
-  if (!url || !key) return null;
-  if (!timelineSupabase) timelineSupabase = createClient(url, key);
-  return timelineSupabase;
-}
-
-async function loadSupabaseChatHistory() {
-  const client = getTimelineSupabase();
-  if (!client) return [];
-  try {
-    const { data, error } = await client
-      .from("timeline")
-      .select("role,content,created_at")
-      .in("role", ["user", "assistant"])
-      .order("created_at", { ascending: false })
-      .limit(CHAT_HISTORY_MESSAGE_LIMIT);
-    if (error) throw error;
-    return [...(data || [])].reverse().map(({ role, content }) => ({ role, content }));
-  } catch (error) {
-    console.warn(JSON.stringify({ event: "chat_history_fallback", reason: error.message }));
-    return [];
-  }
-}
 
 function readBodyLimitBytes() {
   const configured = Number(process.env.REQUEST_BODY_LIMIT_MB);
@@ -670,19 +642,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
     }));
 
     const kelivoMessages = body.messages || [];
-    const localTimeline = loadTimeline();
-    const supabaseHistory = await loadSupabaseChatHistory();
-    const localSystem = localTimeline.find(isSystemRule);
-    const localSpecialEvents = localTimeline.filter(isSpecialEvent);
-    const combinedRealHistory = mergeRealMessageHistory(
-      supabaseHistory,
-      localTimeline.filter(isRealMessageForTimeline)
-    );
-    const oldTimeline = [
-      ...(localSystem ? [localSystem] : []),
-      ...combinedRealHistory,
-      ...localSpecialEvents
-    ];
+    const oldTimeline = loadTimeline();
 
     const tsDB = loadTimestampDB();
     let tsDBDirty = false;
