@@ -50,12 +50,12 @@ begin
   update xhs_patrol_jobs set status=case when p_error is null then 'completed' else 'failed' end, result=p_result, error=p_error, completed_at=now() where id=p_job_id and status='claimed';
 end $$;
 
-create or replace function public.complete_xhs_patrol_job_b64(p_device_id text, p_secret text, p_job_id uuid, p_result_b64 text, p_error text default null)
+create or replace function public.complete_xhs_patrol_job_b64(p_device_id text, p_secret text, p_job_id uuid, p_result_base64 text, p_error text default null)
 returns void language plpgsql security definer set search_path=public,extensions as $$
 declare v_result jsonb;
 begin
   if not exists (select 1 from xhs_patrol_devices where id=p_device_id and enabled and secret_hash=encode(digest(p_secret,'sha256'),'hex')) then raise exception 'unauthorized'; end if;
-  v_result := case when p_result_b64 is null or p_result_b64='' then null else convert_from(decode(p_result_b64,'base64'),'utf8')::jsonb end;
+  v_result := case when p_result_base64 is null or p_result_base64='' then null else convert_from(decode(p_result_base64,'base64'),'utf8')::jsonb end;
   update xhs_patrol_jobs set status=case when p_error is null then 'completed' else 'failed' end, result=v_result, error=p_error, completed_at=now() where id=p_job_id and status='claimed';
 end $$;
 
@@ -65,4 +65,3 @@ grant execute on function public.claim_xhs_patrol_job(text,text) to anon, authen
 grant execute on function public.complete_xhs_patrol_job(text,text,uuid,jsonb,text) to anon, authenticated, service_role;
 revoke all on function public.complete_xhs_patrol_job_b64(text,text,uuid,text,text) from public;
 grant execute on function public.complete_xhs_patrol_job_b64(text,text,uuid,text,text) to anon, authenticated, service_role;
-
