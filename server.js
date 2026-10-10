@@ -19,7 +19,6 @@ const {
 } = require("./time_utils");
 
 const DEFAULT_BODY_LIMIT_MB = 50;
-const CHAT_HISTORY_MESSAGE_LIMIT = 48;
 
 function readBodyLimitBytes() {
   const configured = Number(process.env.REQUEST_BODY_LIMIT_MB);
@@ -229,79 +228,9 @@ function loadTimeline() {
 function saveTimeline(messages) {
   const sp = messages.find(m => m.role === "system");
   const nonSP = messages.filter(m => m.role !== "system");
-  const trimmed = nonSP.slice(-CHAT_HISTORY_MESSAGE_LIMIT);
+  const trimmed = nonSP.slice(-49);
   const final = sp ? [sp, ...trimmed] : trimmed;
   writeJsonAtomicSync(TIMELINE_FILE, final);
-}
-
-function messageHistoryKey(msg) {
-  return JSON.stringify({
-    role: msg?.role || "",
-    content: normalizeContentToText(msg?.content)
-  });
-}
-
-// Kelivo 可能只随请求携带较短的聊天窗口。把新窗口与网关保存的时间线按
-// “旧记录后缀 = 新记录前缀”拼接，既补回较早上下文，也保留真实的重复发言。
-function mergeRealMessageHistory(oldMessages, newMessages) {
-  const oldReal = oldMessages
-    .filter(isRealMessageForTimeline)
-    .map(normalizeMessageForTimeline);
-  const newReal = newMessages.map(normalizeMessageForTimeline);
-  const maxOverlap = Math.min(oldReal.length, newReal.length);
-  let overlap = 0;
-
-  for (let size = maxOverlap; size > 0; size--) {
-    let matches = true;
-    for (let i = 0; i < size; i++) {
-      if (messageHistoryKey(oldReal[oldReal.length - size + i]) !== messageHistoryKey(newReal[i])) {
-        matches = false;
-        break;
-      }
-    }
-    if (matches) {
-      overlap = size;
-      break;
-    }
-  }
-
-  return [...oldReal, ...newReal.slice(overlap)].slice(-CHAT_HISTORY_MESSAGE_LIMIT);
-}
-
-function buildChatMessagesFromTimeline(finalTimeline, kelivoMessages) {
-  const currentSystem = kelivoMessages.filter(isSystemRule).map(prepareMessageForLLM).filter(Boolean);
-  const currentNonSystem = kelivoMessages.filter(msg => !isSystemRule(msg));
-  const history = stripPosition(finalTimeline)
-    .filter(msg => !isSystemRule(msg))
-    .slice(-CHAT_HISTORY_MESSAGE_LIMIT)
-    .map(prepareMessageForLLM)
-    .filter(Boolean);
-
-  // 时间线为保护隐私会把图片存成占位文字；当前请求中的原图、文件和工具消息
-  // 必须继续原样交给模型。由后向前替换对应的当前消息即可。
-  let searchEnd = history.length;
-  for (let i = currentNonSystem.length - 1; i >= 0; i--) {
-    const current = currentNonSystem[i];
-    const key = messageHistoryKey(current);
-    for (let j = searchEnd - 1; j >= 0; j--) {
-      if (messageHistoryKey(history[j]) === key) {
-        const prepared = prepareMessageForLLM(current);
-        if (prepared) history[j] = prepared;
-        searchEnd = j;
-        break;
-      }
-    }
-  }
-
-  // tool 消息不写入持久时间线，但本轮若存在必须保留。
-  for (const msg of currentNonSystem) {
-    if (msg.role === "tool" || msg.tool_calls) {
-      const prepared = prepareMessageForLLM(msg);
-      if (prepared && !history.includes(prepared)) history.push(prepared);
-    }
-  }
-
-  return [...currentSystem, ...history.slice(-CHAT_HISTORY_MESSAGE_LIMIT)];
 }
 
 // ========================
@@ -398,7 +327,9 @@ function buildTimeline(kelivoMessages, tsDB) {
   const latestSP = newSystemMessages.length > 0 ? newSystemMessages[newSystemMessages.length - 1] : null;
   const oldSP = oldTimeline.find(msg => msg.role === "system");
 
-  const newRealMessages = kelivoMessages.filter(isRealMessageForTimeline);
+  const newRealMessages = kelivoMessages
+    .filter(isRealMessageForTimeline)
+    .map(normalizeMessageForTimeline);
 
   const oldSpecialEvents = oldTimeline.filter(isSpecialEvent).sort((a, b) => {
     const timeA = extractTimestampWithMemory(a, tsDB);
@@ -407,7 +338,7 @@ function buildTimeline(kelivoMessages, tsDB) {
     return 0;
   });
 
-  const merged = mergeRealMessageHistory(oldTimeline, newRealMessages);
+  const merged = [...newRealMessages];
   for (const event of oldSpecialEvents) {
     const eventTime = extractTimestampWithMemory(event, tsDB);
     if (!eventTime) { merged.push(event); continue; }
@@ -663,7 +594,9 @@ app.post("/v1/chat/completions", async (req, reply) => {
 
     // Kelivo 发图时 content 常是数组。默认原样透传给视觉模型；
     // 如上游不支持图片，可设置 MULTIMODAL_MODE=text 退回文本占位。
-    const llmMessages = buildChatMessagesFromTimeline(finalTimeline, kelivoMessages);
+    const llmMessages = kelivoMessages
+      .map(prepareMessageForLLM)
+      .filter(Boolean);
 
     const oldEvents = stripPosition(
       oldTimeline.filter(isSpecialEvent).sort((a, b) => {
