@@ -5,11 +5,13 @@ const path = require("path");
 const { buildNtfyPayload } = require("./ntfy_priority");
 const { remainingWakeCooldownMs } = require("./wake_cooldown");
 const { createClient } = require("@supabase/supabase-js");
+const { createPatrolCloud } = require("./xhs_patrol_cloud");
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_KEY
 );
+const runXhsPatrolTick = createPatrolCloud();
 
 const {
   ensureDataDir,
@@ -2801,6 +2803,7 @@ async function runWeatherReminder() {
 
 async function scheduleNextCheck() {
   try {
+    await runXhsPatrolTick();
     try {
       await fetch(
         HEARTBEAT_URL,
