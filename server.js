@@ -2,6 +2,7 @@ require("dotenv").config({ quiet: true });
 
 const Fastify = require("fastify");
 const fs = require("fs-extra");
+const { personalizeMemoriesSection } = require("./memory_personalization");
 const path = require("path");
 const {
   PROJECT_DIR,
@@ -572,7 +573,13 @@ app.post("/v1/chat/completions", async (req, reply) => {
       messages: summarizeMessagesForLog(body?.messages || [])
     }));
 
-    const kelivoMessages = body.messages || [];
+    // Kelivo may keep an older rendered Memories block on the phone even after
+    // the database summaries are updated. Normalize only that block at the
+    // gateway boundary so ordinary prompts and terms such as OpenAI stay intact.
+    const kelivoMessages = (body.messages || []).map(msg => {
+      if (msg.role !== "system" || typeof msg.content !== "string") return msg;
+      return { ...msg, content: personalizeMemoriesSection(msg.content) };
+    });
     const oldTimeline = loadTimeline();
 
     const tsDB = loadTimestampDB();
