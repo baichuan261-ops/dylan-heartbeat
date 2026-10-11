@@ -61,6 +61,59 @@ function patrolDatabase() {
   return createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 }
 
+function xhsExcursionDurationMinutes(text) {
+  const value = String(text || "");
+  const hourMatch = value.match(/([一二两三四五六七八九十\d]+)\s*个?小时/);
+  const minuteMatch = value.match(/(\d+)\s*分钟/);
+  const cn = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
+  if (hourMatch) {
+    const hours = Number(hourMatch[1]) || cn[hourMatch[1]] || 1;
+    return Math.min(360, Math.max(30, hours * 60));
+  }
+  if (minuteMatch) return Math.min(360, Math.max(20, Number(minuteMatch[1])));
+  if (/一会儿|一会|玩会|刷会/.test(value)) return 90;
+  return 60;
+}
+
+async function enqueueXhsExcursion(text) {
+  const normalized = String(text || "").trim();
+  if (!/(?:去|想|帮我|自己)?.{0,8}(?:刷|逛|玩).{0,6}小红书|小红书.{0,6}(?:刷|逛|玩)/i.test(normalized)) return false;
+  const db = patrolDatabase();
+  const durationMinutes = xhsExcursionDurationMinutes(normalized);
+  const intervalMinutes = 15;
+  const rounds = Math.max(2, Math.min(16, Math.ceil(durationMinutes / intervalMinutes)));
+  const requestKey = crypto.createHash("sha256")
+    .update(`${Math.floor(Date.now() / 600000)}:${normalized}`)
+    .digest("hex").slice(0, 24);
+  const { data: existing, error: existingError } = await db
+    .from("xhs_patrol_jobs")
+    .select("id")
+    .contains("payload", { request_key: requestKey })
+    .limit(1);
+  if (existingError) throw existingError;
+  if (existing?.length) return false;
+  const sessionId = crypto.randomUUID();
+  const startedAt = Date.now() + 5000;
+  const jobs = Array.from({ length: rounds }, (_, index) => ({
+    kind: "browse",
+    status: "queued",
+    scheduled_at: new Date(startedAt + index * intervalMinutes * 60000).toISOString(),
+    payload: {
+      invitation: true,
+      source: "user_excursion",
+      session_id: sessionId,
+      request_key: requestKey,
+      round_index: index + 1,
+      total_rounds: rounds,
+      duration_minutes: durationMinutes
+    }
+  }));
+  const { error } = await db.from("xhs_patrol_jobs").insert(jobs);
+  if (error) throw error;
+  app.log.info({ session_id: sessionId, rounds, duration_minutes: durationMinutes }, "xhs excursion queued");
+  return true;
+}
+
 const PORT = Number(process.env.PORT) || 3000;
 const TARGET_API_URL = process.env.TARGET_API_URL;
 const TIME_ZONE = resolveTimeZone();
@@ -644,6 +697,17 @@ app.post("/internal/xhs-worker/complete", { preHandler: xhsWorkerAuth }, async (
   }
 });
 
+app.post("/internal/xhs-worker/enqueue", { preHandler: xhsWorkerAuth }, async (req, reply) => {
+  try {
+    const text = String(req.body?.text || "去刷一会儿小红书");
+    const queued = await enqueueXhsExcursion(text);
+    return reply.send({ success: true, queued });
+  } catch (error) {
+    req.log.error({ err: error }, "xhs excursion enqueue failed");
+    return reply.code(503).send({ error: error.message || "enqueue failed" });
+  }
+});
+
 // ========================
 // Models
 // ========================
@@ -660,6 +724,14 @@ app.get("/v1/models", async (req, reply) => {
 app.post("/v1/chat/completions", async (req, reply) => {
   try {
     const body = req.body;
+    const latestUser = [...(Array.isArray(body?.messages) ? body.messages : [])]
+      .reverse().find(message => message?.role === "user");
+    const latestUserText = normalizeContentToText(latestUser?.content);
+    if (latestUserText) {
+      enqueueXhsExcursion(latestUserText).catch(error => {
+        req.log.error({ err: error }, "automatic xhs excursion scheduling failed");
+      });
+    }
     // 批注 2026-07-15：公开部署时日志不能默认写入完整上下文；
     // 这里只保留请求摘要，避免 system prompt、记忆和聊天正文进入 pm2 日志。
     console.log(JSON.stringify({

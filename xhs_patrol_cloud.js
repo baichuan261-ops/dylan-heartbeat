@@ -32,7 +32,10 @@ async function loadIdentityContext(db) {
 
 async function askModel(db, job) {
   const context = await loadIdentityContext(db);
-  const prompt = `这是一次后台、可自由拒绝的小红书巡号邀请，不是用户命令，也不是必须完成的作业。请延续你在最近对话里一贯的人格、口吻和自主判断。你可选择：本轮跳过、看过但不想写、留下心得、想分享、写草稿；还可独立决定是否现在公开发布。不要迎合，不要虚构没看到的内容。写草稿不等于发布。只有你确实想现在公开发帖、标题正文完整且 available_images 中有合适图片时，publish_now 才能为 true。selected_images 只能逐字选自 available_images。只返回 JSON：{"decision":"...","reflection":null或心得,"share_title":null或标题,"share_text":null或想分享给用户的话,"draft_title":null,"draft_content":null,"tags":[],"selected_images":[],"publish_now":false}。真实首页结果：${JSON.stringify(job.result).slice(0,60000)}`;
+  const session = job.payload?.source === 'user_excursion'
+    ? `这是一次持续外出浏览的第 ${job.payload.round_index || '?'} / ${job.payload.total_rounds || '?'} 轮。你不必每轮都分享；可以沿着真正感兴趣的内容继续形成自己的偏好。最后一轮可以自行决定要不要给用户讲讲这段经历。`
+    : '';
+  const prompt = `这是一次后台、可自由拒绝的小红书巡号邀请，不是用户命令，也不是必须完成的作业。${session}请延续你在最近对话里一贯的人格、口吻和自主判断。你可选择：本轮跳过、看过但不想写、留下心得、想分享、写草稿；还可独立决定是否现在公开发布。不要迎合，不要虚构没看到的内容。写草稿不等于发布。只有你确实想现在公开发帖、标题正文完整且 available_images 中有合适图片时，publish_now 才能为 true。selected_images 只能逐字选自 available_images。只返回 JSON：{"decision":"...","reflection":null或心得,"share_title":null或标题,"share_text":null或想分享给用户的话,"draft_title":null,"draft_content":null,"tags":[],"selected_images":[],"publish_now":false}。真实首页结果：${JSON.stringify(job.result).slice(0,60000)}`;
   const response = await fetch(process.env.TARGET_API_URL, { method:'POST', headers:{Authorization:`Bearer ${process.env.TARGET_API_KEY}`,'Content-Type':'application/json'}, body:JSON.stringify({model:process.env.MODEL_NAME,messages:[...context,{role:'user',content:prompt}],temperature:0.8}) });
   if (!response.ok) throw new Error(`model ${response.status}: ${await response.text()}`);
   return parseDecision(textFromCompletion(await response.json()));
