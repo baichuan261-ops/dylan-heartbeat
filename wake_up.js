@@ -2801,9 +2801,67 @@ async function runWeatherReminder() {
   }
 }
 
+let xhsSummaryCheckedDate = "";
+async function runXhsDailySummary() {
+  if (!readBooleanEnv("XHS_DAILY_SUMMARY_ENABLED", true)) return false;
+  const now = new Date();
+  const parts = getDatePartsInTimeZone(now, TIME_ZONE);
+  const localDate = `${parts.year}-${parts.month}-${parts.day}`;
+  const localMinutes = Number(parts.hour) * 60 + Number(parts.minute);
+  const summaryMinutes = readNumberEnv("XHS_DAILY_SUMMARY_HOUR", 23, { min: 0, max: 23 }) * 60 +
+    readNumberEnv("XHS_DAILY_SUMMARY_MINUTE", 50, { min: 0, max: 59 });
+  if (localMinutes < summaryMinutes || xhsSummaryCheckedDate === localDate) return false;
+  xhsSummaryCheckedDate = localDate;
+  const triggerType = `xhs-daily-summary:${localDate}`;
+  try {
+    const { data: alreadySent, error: sentError } = await supabase
+      .from("heartbeat_push_logs")
+      .select("created_at")
+      .eq("trigger_type", triggerType)
+      .limit(1);
+    if (sentError) throw sentError;
+    if (alreadySent?.length) return false;
+    const start = zonedWallTimeToDate({
+      year: parts.year, month: parts.month, day: parts.day, hour: 0, minute: 0
+    }, TIME_ZONE);
+    const end = new Date(start.getTime() + 24 * 60 * 60000);
+    const { data: notes, error } = await supabase
+      .from("巡号手记")
+      .select("decision,shared_with_user,reflection,draft_title,patrolled_at")
+      .gte("patrolled_at", start.toISOString())
+      .lt("patrolled_at", end.toISOString())
+      .order("patrolled_at", { ascending: true });
+    if (error) throw error;
+    const rows = notes || [];
+    const count = decision => rows.filter(item => item.decision === decision).length;
+    const shared = rows.filter(item => item.shared_with_user).length;
+    const reflections = rows.filter(item => item.reflection).length;
+    const drafts = rows.filter(item => item.draft_title || item.decision === "写草稿").length;
+    const quiet = rows.filter(item => ["本轮跳过", "看过但不想写"].includes(item.decision)).length;
+    const name = String(process.env.XHS_CHARACTER_NAME || "Silas").trim() || "Silas";
+    const body = rows.length
+      ? `今天 ${name} 出门逛了小红书 ${rows.length} 次。主动分享 ${shared} 次，留下心得 ${reflections} 次，写了 ${drafts} 份草稿，安静看过 ${quiet} 次。`
+      : `今天 ${name} 没有出门逛小红书。`;
+    const pushed = await sendPushNotification({ title: `${name} 的小红书足迹`, body });
+    if (!pushed.ok) {
+      xhsSummaryCheckedDate = "";
+      console.log("📕 小红书每日足迹推送失败，稍后重试");
+      return false;
+    }
+    await saveHeartbeatPushLog(body, triggerType);
+    console.log(`📕 已发送 ${localDate} 小红书每日足迹：${rows.length} 次`);
+    return true;
+  } catch (error) {
+    xhsSummaryCheckedDate = "";
+    console.log("📕 小红书每日足迹本轮跳过：", error.message || error);
+    return false;
+  }
+}
+
 async function scheduleNextCheck() {
   try {
     await runXhsPatrolTick();
+    await runXhsDailySummary();
     try {
       await fetch(
         HEARTBEAT_URL,
