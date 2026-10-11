@@ -2,6 +2,8 @@ require("dotenv").config({ quiet: true });
 
 const Fastify = require("fastify");
 const fs = require("fs-extra");
+const crypto = require("crypto");
+const { createClient } = require("@supabase/supabase-js");
 const { personalizeMemoriesSection } = require("./memory_personalization");
 const path = require("path");
 const {
@@ -33,6 +35,31 @@ const app = Fastify({
 });
 
 app.register(require("@fastify/formbody"));
+
+const XHS_WORKER_TOKEN_SHA256 = String(
+  process.env.XHS_WORKER_TOKEN_SHA256 ||
+  "77afddc2104352585cf742e0dd32ec07f27c6c5f32eac981c8e60b23f09089a3"
+).trim().toLowerCase();
+
+function xhsWorkerAuthorized(req) {
+  const header = String(req.headers.authorization || "");
+  const token = header.replace(/^Bearer\s+/i, "").trim();
+  if (!token || !/^[a-f0-9]{64}$/.test(XHS_WORKER_TOKEN_SHA256)) return false;
+  const actual = crypto.createHash("sha256").update(token, "utf8").digest("hex");
+  return crypto.timingSafeEqual(Buffer.from(actual), Buffer.from(XHS_WORKER_TOKEN_SHA256));
+}
+
+function xhsWorkerAuth(req, reply, done) {
+  if (xhsWorkerAuthorized(req)) return done();
+  reply.code(401).send({ error: "unauthorized" });
+}
+
+function patrolDatabase() {
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_KEY) {
+    throw new Error("Supabase patrol storage is not configured");
+  }
+  return createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+}
 
 const PORT = Number(process.env.PORT) || 3000;
 const TARGET_API_URL = process.env.TARGET_API_URL;
@@ -417,6 +444,7 @@ function stripPosition(messages) {
   return messages.map(({ position, ...rest }) => rest);
 }
 
+const gatewayStartedAt = Date.now();
 let wakeUpLastHeartbeat = null;
 
 // ========================
@@ -546,7 +574,75 @@ app.addHook("onRequest", (req, reply, done) => {
   reply.code(access.status || 403).send(access.status === 401 ? { error: access.error } : access.error);
 });
 
-app.get("/healthz", async () => ({ status: "ok" }));
+app.get("/healthz", async () => {
+  const now = Date.now();
+  const heartbeatAgeSeconds = wakeUpLastHeartbeat
+    ? Math.max(0, Math.round((now - wakeUpLastHeartbeat) / 1000))
+    : null;
+  return {
+    status: "ok",
+    gateway: "online",
+    wake_up: wakeUpLastHeartbeat ? "online" : "starting",
+    wake_up_last_heartbeat: wakeUpLastHeartbeat
+      ? new Date(wakeUpLastHeartbeat).toISOString()
+      : null,
+    wake_up_heartbeat_age_seconds: heartbeatAgeSeconds,
+    gateway_uptime_seconds: Math.max(0, Math.round((now - gatewayStartedAt) / 1000))
+  };
+});
+
+// The local Xiaohongshu worker pulls jobs through the gateway so Supabase
+// credentials never have to be copied onto the user's PC.
+app.post("/internal/xhs-worker/claim", { preHandler: xhsWorkerAuth }, async (req, reply) => {
+  try {
+    const db = patrolDatabase();
+    const { data: candidate, error } = await db
+      .from("xhs_patrol_jobs")
+      .select("*")
+      .eq("status", "queued")
+      .lte("scheduled_at", new Date().toISOString())
+      .order("scheduled_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    if (!candidate) return reply.send({ job: null });
+    const { data: claimed, error: claimError } = await db
+      .from("xhs_patrol_jobs")
+      .update({ status: "claimed", claimed_at: new Date().toISOString() })
+      .eq("id", candidate.id)
+      .eq("status", "queued")
+      .select("*")
+      .maybeSingle();
+    if (claimError) throw claimError;
+    return reply.send({ job: claimed || null });
+  } catch (error) {
+    req.log.error({ err: error }, "xhs worker claim failed");
+    return reply.code(503).send({ error: error.message || "claim failed" });
+  }
+});
+
+app.post("/internal/xhs-worker/complete", { preHandler: xhsWorkerAuth }, async (req, reply) => {
+  try {
+    const { id, result, error: workerError } = req.body || {};
+    if (!id) return reply.code(400).send({ error: "job id is required" });
+    const db = patrolDatabase();
+    const { error } = await db
+      .from("xhs_patrol_jobs")
+      .update({
+        status: workerError ? "failed" : "completed",
+        result: result || null,
+        error: workerError || null,
+        completed_at: new Date().toISOString()
+      })
+      .eq("id", id)
+      .eq("status", "claimed");
+    if (error) throw error;
+    return reply.send({ success: true });
+  } catch (error) {
+    req.log.error({ err: error }, "xhs worker completion failed");
+    return reply.code(503).send({ error: error.message || "completion failed" });
+  }
+});
 
 // ========================
 // Models
