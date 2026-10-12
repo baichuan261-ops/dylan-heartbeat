@@ -6,7 +6,8 @@ const path = require("path");
 const gateway = String(process.env.XHS_WORKER_GATEWAY_URL || "https://lin-heartbeat.onrender.com").replace(/\/+$/, "");
 const mcp = String(process.env.XHS_MCP_URL || "http://100.97.221.42:18060").replace(/\/+$/, "");
 const tokenFile = process.env.XHS_WORKER_TOKEN_FILE || path.join(__dirname, "..", "xhs-state", "auth-token.txt");
-const token = fs.readFileSync(tokenFile, "utf8").trim();
+const token = String(process.env.XHS_WORKER_TOKEN || "").trim() ||
+  fs.readFileSync(tokenFile, "utf8").trim();
 const pollMs = Math.max(15000, Number(process.env.XHS_WORKER_POLL_MS) || 60000);
 
 async function jsonRequest(url, options = {}, timeoutMs = 120000) {
