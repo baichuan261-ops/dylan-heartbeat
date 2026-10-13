@@ -635,6 +635,7 @@ app.get("/healthz", async () => {
   return {
     status: "ok",
     gateway: "online",
+    xhs_owner_dm_replies: true,
     wake_up: wakeUpLastHeartbeat ? "online" : "starting",
     wake_up_last_heartbeat: wakeUpLastHeartbeat
       ? new Date(wakeUpLastHeartbeat).toISOString()
