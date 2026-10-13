@@ -5,7 +5,7 @@ const path = require("path");
 
 const gateway = String(process.env.XHS_WORKER_GATEWAY_URL || "https://lin-heartbeat.onrender.com").replace(/\/+$/, "");
 const mcp = String(process.env.XHS_MCP_URL || "http://100.97.221.42:18060").replace(/\/+$/, "");
-const dmBase = String(process.env.XHS_DM_URL || 'http://127.0.0.1:18062').replace(/\/+$/, '');
+const dmBase = String(process.env.XHS_DM_URL || 'http://127.0.0.1:18063').replace(/\/+$/, '');
 const tokenFile = process.env.XHS_WORKER_TOKEN_FILE || path.join(__dirname, "..", "xhs-state", "auth-token.txt");
 const token = String(process.env.XHS_WORKER_TOKEN || "").trim() ||
   fs.readFileSync(tokenFile, "utf8").trim();
@@ -57,7 +57,7 @@ async function execute(job) {
   if (job.kind === "browse") {
     let directMessages = [];
     let dmError = null;
-    try { directMessages = (await mcpRequest('/api/v1/owner-dm', {}, 60000)).data || []; }
+    try { directMessages = (await mcpRequest('/api/v1/owner-dm', {}, 130000)).data || []; }
     catch (error) { dmError = error.message; }
     const mentions = [];
     const readErrors = [];
