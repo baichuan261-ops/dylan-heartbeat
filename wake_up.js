@@ -3,6 +3,7 @@ require("dotenv").config({ quiet: true });
 const fs = require("fs");
 const path = require("path");
 const { buildNtfyPayload } = require("./ntfy_priority");
+const { parsePushText } = require("./push_text");
 const { remainingWakeCooldownMs } = require("./wake_cooldown");
 const { createClient } = require("@supabase/supabase-js");
 const { createPatrolCloud } = require("./xhs_patrol_cloud");
@@ -2243,6 +2244,7 @@ async function runWakeUp() {
   // ========================
 
   const heartbeatPushInstruction = `
+发送推送时必须使用两行格式，第一行是简短标题，第二行起是正文；使用真实换行，不要把标题和正文挤在同一行。不要输出“来自AI”作为标题。选择不发送时仍遵循原有不发送规则。
 ## 最近主动推送记录
 
 ${recentPushContext}
@@ -2467,96 +2469,9 @@ ${recentChangesText}
       "\nAI 选择发送推送\n"
     );
 
-    let barkText =
-      aiText;
-
-    const barkMatch =
-      barkText.match(
-        /\[BARK\]([\s\S]*?)\[\/BARK\]/i
-      );
-
-    if (barkMatch) {
-      barkText =
-        barkMatch[1].trim();
-    } else {
-      barkText =
-        barkText
-          .replace(
-            /^\[BARK\]\s*/i,
-            ""
-          )
-          .trim();
-
-      barkText =
-        barkText
-          .replace(
-            /\s*\[\/BARK\]\s*$/i,
-            ""
-          )
-          .trim();
-    }
-
-    barkText =
-      barkText
-        .replace(
-          /^标题[：:]\s*/gm,
-          ""
-        )
-        .replace(
-          /^正文[：:]\s*/gm,
-          ""
-        );
-
-    const lines =
-      barkText
-        .split("\n")
-        .filter(
-          line =>
-            line.trim() !== ""
-        );
-
-    let title;
-    let body;
-
-    if (
-      lines.length === 0
-    ) {
-      console.log(
-        "\n推送内容清洗后为空，本次不发送推送\n"
-      );
-
-      eventContent =
-        `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：推送内容为空）`;
-
-    } else if (
-      lines.length === 1
-    ) {
-      title =
-        "来自AI";
-
-      body =
-        lines[0].trim();
-
-    } else if (
-      lines.length === 2
-    ) {
-      title =
-        lines[0].trim();
-
-      body =
-        lines[1].trim();
-
-    } else {
-      title =
-        lines[0].trim();
-
-      body =
-        lines
-          .slice(1)
-          .map(
-            l => l.trim()
-          )
-          .join(" ");
+    const { title, body } = parsePushText(aiText, process.env.XHS_CHARACTER_NAME || 'Silas');
+    if (!body) {
+      eventContent = `（${getLocalTimeString()} 自动唤醒：本次未发送推送｜原因：推送内容为空）`;
     }
 
     if (!eventContent) {
