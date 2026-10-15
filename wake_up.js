@@ -2789,7 +2789,9 @@ async function scheduleNextCheck() {
 
     // Do not send both a weather reminder and a conversational push in one tick.
     const weatherSent = await runWeatherReminder();
-    if (!weatherSent) await runWakeUp();
+    // Daily conversation is owned by the Render kelivo-backend cron.
+    // Keep patrol, daily footprints and weather independent of this switch.
+    if (!weatherSent && process.env.LEGACY_CONVERSATION_PUSH_ENABLED === 'true') await runWakeUp();
 
   } catch (err) {
     console.error(

@@ -636,6 +636,7 @@ app.get("/healthz", async () => {
     status: "ok",
     gateway: "online",
     xhs_owner_dm_replies: true,
+    conversation_push_owner: process.env.LEGACY_CONVERSATION_PUSH_ENABLED === 'true' ? 'lin-heartbeat' : 'kelivo-backend-cron',
     wake_up: wakeUpLastHeartbeat ? "online" : "starting",
     wake_up_last_heartbeat: wakeUpLastHeartbeat
       ? new Date(wakeUpLastHeartbeat).toISOString()
